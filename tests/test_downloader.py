@@ -172,3 +172,39 @@ def test_params_accepted_by_yt_dlp(tmp_path):
     with yt_dlp.YoutubeDL(dl.build_ydl_params()) as ydl:
         ydl.add_post_processor(d._FolderNamePP(dl), when="pre_process")
         ydl.add_post_processor(d._FinishPP(dl), when="after_move")
+
+
+# ------------------------------------------------------- папка завантаження ---
+
+def test_prepare_output_dir_creates_missing(tmp_path):
+    target = tmp_path / "a" / "b"
+    result = d.prepare_output_dir(str(target))
+    assert target.is_dir()
+    assert result == str(target.resolve())
+    assert list(target.iterdir()) == []  # тестовий файл прибрано
+
+
+def test_prepare_output_dir_expands_user(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert d.prepare_output_dir("~/YT") == str((tmp_path / "YT").resolve())
+
+
+def test_prepare_output_dir_rejects_file(tmp_path):
+    f = tmp_path / "file.txt"
+    f.write_text("x")
+    with pytest.raises(OSError, match="не папка"):
+        d.prepare_output_dir(str(f))
+
+
+def test_prepare_output_dir_rejects_empty():
+    with pytest.raises(OSError):
+        d.prepare_output_dir("  ")
+
+
+def test_prepare_output_dir_not_writable(tmp_path, monkeypatch):
+    def deny(self, data):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(d.Path, "write_bytes", deny)
+    with pytest.raises(OSError, match="Немає дозволу на запис"):
+        d.prepare_output_dir(str(tmp_path / "x"))

@@ -7,11 +7,13 @@ import queue
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
 import downloader as dl
+import settings
 
 MODE_LABELS = {
     "Одне відео": dl.MODE_SINGLE,
@@ -24,6 +26,14 @@ QUALITY_LABELS = {
     "Лише аудіо (MP3)": dl.QUALITY_AUDIO,
 }
 LOG_PREFIX = {"warning": "⚠ ", "error": "✖ "}
+
+
+def _label_for(labels: dict, value, default: str) -> str:
+    """Підпис у списку для збереженого значення (або ``default``)."""
+    for label, val in labels.items():
+        if val == value:
+            return label
+    return default
 
 
 def format_speed(speed: float | None) -> str:
@@ -40,20 +50,44 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("YouTube Downloader")
-        self.geometry("760x640")
-        self.minsize(640, 560)
+        self.geometry("780x700")
+        self.minsize(660, 620)
 
         self._events: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         self._downloader: dl.Downloader | None = None
+        saved = settings.load_settings()
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(5, weight=1)
         pad = {"padx": 16, "pady": (12, 0)}
 
+        # --- папка -----------------------------------------------------------
+        folder_frame = ctk.CTkFrame(self, border_width=2,
+                                    border_color=("#3b8ed0", "#1f6aa5"))
+        folder_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 0))
+        folder_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(folder_frame, text="📁 Папка для завантаження",
+                     font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 0))
+        self.folder_entry = ctk.CTkEntry(folder_frame, height=34)
+        self.folder_entry.insert(0, saved.get("output_dir") or dl.DEFAULT_OUTPUT_DIR)
+        self.folder_entry.grid(row=1, column=0, sticky="ew", padx=(12, 0), pady=(6, 0))
+        ctk.CTkButton(folder_frame, text="Обрати…", width=100, height=34,
+                      command=self._choose_folder).grid(row=1, column=1, padx=(8, 0),
+                                                        pady=(6, 0))
+        ctk.CTkButton(folder_frame, text="Відкрити", width=100, height=34,
+                      fg_color="gray40", hover_color="gray30",
+                      command=self._open_folder).grid(row=1, column=2, padx=(8, 12),
+                                                      pady=(6, 0))
+        ctk.CTkLabel(folder_frame, text="Кожне відео зберігається в окрему підпапку "
+                                        "всередині цієї папки.",
+                     text_color=("gray35", "gray65")).grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=12, pady=(2, 8))
+
         # --- посилання -------------------------------------------------------
         url_frame = ctk.CTkFrame(self, fg_color="transparent")
-        url_frame.grid(row=0, column=0, sticky="ew", **pad)
+        url_frame.grid(row=1, column=0, sticky="ew", **pad)
         url_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(url_frame, text="Посилання на відео, плейлист або канал:").grid(
             row=0, column=0, columnspan=2, sticky="w")
@@ -65,52 +99,42 @@ class App(ctk.CTk):
 
         # --- режим -----------------------------------------------------------
         mode_frame = ctk.CTkFrame(self)
-        mode_frame.grid(row=1, column=0, sticky="ew", **pad)
+        mode_frame.grid(row=2, column=0, sticky="ew", **pad)
         ctk.CTkLabel(mode_frame, text="Режим:").grid(row=0, column=0, padx=12, pady=10)
-        self.mode_var = ctk.StringVar(value="Одне відео")
+        self.mode_var = ctk.StringVar(
+            value=_label_for(MODE_LABELS, saved.get("mode"), "Одне відео"))
         ctk.CTkSegmentedButton(
             mode_frame, values=list(MODE_LABELS), variable=self.mode_var,
             command=lambda _: self._update_controls(),
         ).grid(row=0, column=1, pady=10)
         ctk.CTkLabel(mode_frame, text="N =").grid(row=0, column=2, padx=(16, 4))
         self.count_entry = ctk.CTkEntry(mode_frame, width=70)
-        self.count_entry.insert(0, "10")
+        self.count_entry.insert(0, str(saved.get("count") or 10))
         self.count_entry.grid(row=0, column=3, padx=(0, 12))
 
         # --- якість ----------------------------------------------------------
         quality_frame = ctk.CTkFrame(self)
-        quality_frame.grid(row=2, column=0, sticky="ew", **pad)
+        quality_frame.grid(row=3, column=0, sticky="ew", **pad)
         ctk.CTkLabel(quality_frame, text="Якість:").grid(row=0, column=0, padx=12, pady=10)
-        self.quality_var = ctk.StringVar(value="Найкраща")
+        self.quality_var = ctk.StringVar(
+            value=_label_for(QUALITY_LABELS, saved.get("quality"), "Найкраща"))
         ctk.CTkOptionMenu(quality_frame, values=list(QUALITY_LABELS),
                           variable=self.quality_var,
                           command=lambda _: self._update_controls(),
                           ).grid(row=0, column=1, pady=10)
         ctk.CTkLabel(quality_frame, text="Бітрейт MP3:").grid(row=0, column=2, padx=(16, 4))
-        self.bitrate_var = ctk.StringVar(value="192")
+        bitrate = saved.get("audio_bitrate")
+        self.bitrate_var = ctk.StringVar(
+            value=bitrate if bitrate in dl.AUDIO_BITRATES else "192")
         self.bitrate_menu = ctk.CTkOptionMenu(
             quality_frame, values=[f"{b}" for b in dl.AUDIO_BITRATES],
             variable=self.bitrate_var, width=80)
         self.bitrate_menu.grid(row=0, column=3)
         ctk.CTkLabel(quality_frame, text="кбіт/с").grid(row=0, column=4, padx=(4, 12))
-        self.save_info_var = ctk.BooleanVar(value=True)
+        self.save_info_var = ctk.BooleanVar(value=saved.get("save_info", True) is not False)
         ctk.CTkCheckBox(quality_frame, text="Зберігати назву та опис",
                         variable=self.save_info_var).grid(row=1, column=0, columnspan=5,
                                                           sticky="w", padx=12, pady=(0, 10))
-
-        # --- папка -----------------------------------------------------------
-        folder_frame = ctk.CTkFrame(self, fg_color="transparent")
-        folder_frame.grid(row=3, column=0, sticky="ew", **pad)
-        folder_frame.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(folder_frame, text="Папка:").grid(row=0, column=0, padx=(0, 8))
-        self.folder_entry = ctk.CTkEntry(folder_frame)
-        self.folder_entry.insert(0, dl.DEFAULT_OUTPUT_DIR)
-        self.folder_entry.grid(row=0, column=1, sticky="ew")
-        ctk.CTkButton(folder_frame, text="Обрати…", width=90,
-                      command=self._choose_folder).grid(row=0, column=2, padx=(8, 0))
-        ctk.CTkButton(folder_frame, text="Відкрити", width=90, fg_color="gray40",
-                      hover_color="gray30",
-                      command=self._open_folder).grid(row=0, column=3, padx=(8, 0))
 
         # --- прогрес ---------------------------------------------------------
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -171,14 +195,30 @@ class App(ctk.CTk):
         self.url_entry.insert(0, text)
 
     def _choose_folder(self) -> None:
-        folder = filedialog.askdirectory(initialdir=self.folder_entry.get() or None)
+        current = os.path.expanduser(self.folder_entry.get().strip())
+        folder = filedialog.askdirectory(
+            parent=self, title="Оберіть папку для завантаження",
+            initialdir=current if os.path.isdir(current) else str(Path.home()))
         if folder:
             self.folder_entry.delete(0, "end")
             self.folder_entry.insert(0, os.path.normpath(folder))
+            self._save_settings()
+
+    def _prepare_folder(self) -> str | None:
+        """Створює/перевіряє папку; при помилці показує повідомлення."""
+        try:
+            folder = dl.prepare_output_dir(self.folder_entry.get())
+        except OSError as exc:
+            self._show_message("Папка для завантаження", str(exc))
+            return None
+        self.folder_entry.delete(0, "end")
+        self.folder_entry.insert(0, folder)
+        return folder
 
     def _open_folder(self) -> None:
-        folder = os.path.expanduser(self.folder_entry.get().strip())
-        os.makedirs(folder, exist_ok=True)
+        folder = self._prepare_folder()
+        if folder is None:
+            return
         if sys.platform == "win32":
             os.startfile(folder)  # noqa: S606
         elif sys.platform == "darwin":
@@ -219,7 +259,9 @@ class App(ctk.CTk):
             except ValueError:
                 self._show_message("Помилка", "N має бути цілим числом більшим за 0.")
                 return None
-        folder = self.folder_entry.get().strip() or dl.DEFAULT_OUTPUT_DIR
+        folder = self._prepare_folder()
+        if folder is None:
+            return None
         return dl.DownloadOptions(
             url=url, mode=mode, count=count,
             quality=QUALITY_LABELS[self.quality_var.get()],
@@ -237,6 +279,8 @@ class App(ctk.CTk):
         options = self._collect_options()
         if options is None:
             return
+        self._save_settings()
+        self._log(f"Папка: {options.output_dir}")
 
         self.progress.set(0)
         self.status_label.configure(text="Отримання інформації…")
@@ -309,13 +353,57 @@ class App(ctk.CTk):
             self._worker = None
             self._update_controls()
 
+    def _save_settings(self) -> None:
+        data = {
+            "output_dir": self.folder_entry.get().strip(),
+            "mode": MODE_LABELS[self.mode_var.get()],
+            "quality": QUALITY_LABELS[self.quality_var.get()],
+            "audio_bitrate": self.bitrate_var.get(),
+            "save_info": bool(self.save_info_var.get()),
+        }
+        count = self.count_entry.get().strip()
+        if count.isdigit() and int(count) > 0:
+            data["count"] = int(count)
+        settings.save_settings(data)
+
     def _on_close(self) -> None:
+        self._save_settings()
         if self._downloader:
             self._downloader.cancel()
         self.destroy()
 
 
+def self_test(report_path: str) -> int:
+    """Перевірка зібраного .exe у CI: вікно створюється, залежності на місці.
+    Результат пишеться в JSON-файл (у --windowed-збірці немає консолі)."""
+    import json
+    import traceback
+
+    report: dict = {}
+    try:
+        import yt_dlp
+        import yt_dlp_ejs  # noqa: F401 — потрібен yt-dlp для YouTube
+
+        report["yt_dlp"] = yt_dlp.version.__version__
+        report["ejs_files"] = len(list(Path(yt_dlp_ejs.__file__).parent.rglob("*.js")))
+        report["ffmpeg"] = dl.find_ffmpeg()
+        ctk.set_appearance_mode("system")
+        app = App()
+        app.update()
+        report["window"] = app.title()
+        app.destroy()
+        report["ok"] = report["ejs_files"] > 0
+    except Exception:  # noqa: BLE001
+        report["ok"] = False
+        report["error"] = traceback.format_exc()
+    Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+    return 0 if report["ok"] else 1
+
+
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
+        sys.exit(self_test(sys.argv[2]))
     ctk.set_appearance_mode("system")
     ctk.set_default_color_theme("blue")
     App().mainloop()

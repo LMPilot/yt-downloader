@@ -103,8 +103,32 @@ def write_info_file(folder: str | os.PathLike, title: str | None,
     """Записує info.txt (UTF-8) у вказану папку й повертає шлях до нього."""
     path = Path(folder) / INFO_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(format_info_text(title, description), encoding="utf-8")
+    path.write_text(format_info_text(title, description), encoding="utf-8", newline="\n")
     return path
+
+
+def prepare_output_dir(folder: str | os.PathLike | None) -> str:
+    """Створює папку для завантаження (якщо її немає) і перевіряє, що в неї
+    можна писати. Повертає абсолютний шлях або кидає ``OSError`` з
+    зрозумілим українським повідомленням."""
+    text = str(folder or "").strip()
+    if not text:
+        raise OSError("Не вказано папку для завантаження.")
+    path = Path(os.path.expandvars(os.path.expanduser(text))).resolve()
+    if path.exists() and not path.is_dir():
+        raise OSError(f"Шлях існує, але це не папка:\n{path}")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OSError(f"Не вдалося створити папку:\n{path}\n\n{exc.strerror or exc}") from exc
+    probe = path / f".yt-downloader-write-test-{os.getpid()}"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as exc:
+        raise OSError(f"Немає дозволу на запис у папку:\n{path}\n\n"
+                      "Оберіть іншу папку.") from exc
+    return str(path)
 
 
 def normalize_url(url: str) -> str:
@@ -282,7 +306,7 @@ class Downloader:
         if not has_js_runtime():
             self._emit("log", {"message": JS_RUNTIME_HINT, "level": "warning"})
 
-        os.makedirs(os.path.expanduser(self.options.output_dir), exist_ok=True)
+        self.options.output_dir = prepare_output_dir(self.options.output_dir)
         params = self.build_ydl_params(ffmpeg)
         self._emit("log", {"message": f"Посилання: {url}", "level": "info"})
 
