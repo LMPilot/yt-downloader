@@ -31,6 +31,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt pyinstaller
 
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (python -c "from version import __version__; print(__version__)").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read version.py" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = $env:GITHUB_REF_NAME
+            if ($tag -ne "v$version") {
+              throw "Tag $tag does not match version.py ($version). Bump __version__ or fix the tag."
+            }
+          }
+          Write-Host "Version: $version"
+
       - name: Run tests and build exe
         shell: pwsh
         run: ./build.ps1 -SkipInstall
@@ -44,12 +59,25 @@ jobs:
             -ArgumentList "--self-test", $report -Wait -PassThru
           if (Test-Path $report) { Get-Content $report -Encoding utf8 }
           if ($p.ExitCode -ne 0) { throw "Self-test failed with exit code $($p.ExitCode)" }
+          $info = Get-Content $report -Encoding utf8 -Raw | ConvertFrom-Json
+          if ($info.version -ne "${{ steps.version.outputs.version }}") {
+            throw "exe reports version $($info.version), expected ${{ steps.version.outputs.version }}"
+          }
+          $fileVersion = (Get-Item dist\yt-downloader.exe).VersionInfo.ProductVersion
+          if ($fileVersion -ne "${{ steps.version.outputs.version }}") {
+            throw "exe file version is '$fileVersion', expected ${{ steps.version.outputs.version }}"
+          }
+          $expected = (Get-Content dist\yt-downloader.exe.sha256).Split()[0]
+          $actual = (Get-FileHash dist\yt-downloader.exe -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "sha256 file mismatch" }
 
       - name: Upload exe artifact
         uses: actions/upload-artifact@v5
         with:
           name: yt-downloader-windows
-          path: dist/yt-downloader.exe
+          path: |
+            dist/yt-downloader.exe
+            dist/yt-downloader.exe.sha256
           if-no-files-found: error
 
       - name: Package exe with ffmpeg
@@ -74,7 +102,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # Програма оновлюється саме з yt-downloader.exe + .sha256 цього релізу.
           files: |
             dist/yt-downloader.exe
+            dist/yt-downloader.exe.sha256
             dist/yt-downloader-windows-with-ffmpeg.zip
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: false
+          make_latest: true

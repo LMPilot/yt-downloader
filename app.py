@@ -14,6 +14,8 @@ import customtkinter as ctk
 
 import downloader as dl
 import settings
+import updater
+from version import __version__
 
 MODE_LABELS = {
     "Одне відео": dl.MODE_SINGLE,
@@ -49,13 +51,17 @@ def format_speed(speed: float | None) -> str:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("YouTube Downloader")
+        self.title(f"YouTube Downloader {__version__}")
         self.geometry("780x700")
         self.minsize(660, 620)
 
         self._events: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         self._downloader: dl.Downloader | None = None
+        self._release: updater.ReleaseInfo | None = None
+        self._checking_update = False
+        self._updating = False
+        self._update_cancel = threading.Event()
         saved = settings.load_settings()
 
         self.grid_columnconfigure(0, weight=1)
@@ -152,9 +158,32 @@ class App(ctk.CTk):
         self.log_box.grid(row=5, column=0, sticky="nsew", padx=16, pady=(12, 0))
         self.log_box.configure(state="disabled")
 
+        # --- оновлення (показується, коли є нова версія) ----------------------
+        self.update_frame = ctk.CTkFrame(self, fg_color=("#d4edda", "#1e4620"))
+        self.update_frame.grid_columnconfigure(0, weight=1)
+        self.update_label = ctk.CTkLabel(self.update_frame, text="", anchor="w")
+        self.update_label.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        ctk.CTkButton(self.update_frame, text="Що нового", width=100,
+                      fg_color="gray40", hover_color="gray30",
+                      command=self._show_release_notes).grid(row=0, column=1, padx=(8, 0))
+        self.update_button = ctk.CTkButton(self.update_frame, text="", fg_color="#2e7d32",
+                                           hover_color="#1b5e20",
+                                           command=self._install_update)
+        self.update_button.grid(row=0, column=2, padx=(8, 12), pady=8)
+
         # --- кнопки ----------------------------------------------------------
-        buttons = ctk.CTkFrame(self, fg_color="transparent")
-        buttons.grid(row=6, column=0, sticky="e", padx=16, pady=12)
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=7, column=0, sticky="ew", padx=16, pady=12)
+        bottom.grid_columnconfigure(2, weight=1)
+        ctk.CTkLabel(bottom, text=f"Версія {__version__}",
+                     text_color=("gray35", "gray65")).grid(row=0, column=0, sticky="w")
+        self.check_button = ctk.CTkButton(
+            bottom, text="Перевірити оновлення", width=170, fg_color="transparent",
+            border_width=1, text_color=("gray20", "gray80"),
+            command=lambda: self._check_updates(manual=True))
+        self.check_button.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        buttons = ctk.CTkFrame(bottom, fg_color="transparent")
+        buttons.grid(row=0, column=3, sticky="e")
         self.start_button = ctk.CTkButton(buttons, text="Завантажити", command=self._start)
         self.start_button.grid(row=0, column=0)
         self.cancel_button = ctk.CTkButton(buttons, text="Скасувати", fg_color="#b03a2e",
@@ -167,18 +196,23 @@ class App(ctk.CTk):
         self._update_controls()
         self.after(100, self._poll_events)
         self.after(300, self._check_ffmpeg_on_startup)
+        self.after(1500, self._check_updates)
 
     # ------------------------------------------------------------------ UI --
 
     def _update_controls(self) -> None:
-        running = self._worker is not None and self._worker.is_alive()
+        downloading = self._worker is not None and self._worker.is_alive()
+        running = downloading or self._updating
         count_on = MODE_LABELS[self.mode_var.get()] == dl.MODE_COUNT and not running
         self.count_entry.configure(state="normal" if count_on else "disabled")
         audio = QUALITY_LABELS[self.quality_var.get()] == dl.QUALITY_AUDIO
         self.bitrate_menu.configure(state="normal" if audio and not running else "disabled")
         self.start_button.configure(state="disabled" if running else "normal")
-        self.cancel_button.configure(state="normal" if running else "disabled",
-                                     fg_color="#b03a2e" if running else "gray50")
+        self.cancel_button.configure(state="normal" if downloading else "disabled",
+                                     fg_color="#b03a2e" if downloading else "gray50")
+        self.update_button.configure(state="disabled" if running else "normal")
+        self.check_button.configure(
+            state="disabled" if self._updating or self._checking_update else "normal")
 
     def _log(self, message: str, level: str = "info") -> None:
         self.log_box.configure(state="normal")
@@ -271,7 +305,7 @@ class App(ctk.CTk):
         )
 
     def _start(self) -> None:
-        if self._worker is not None and self._worker.is_alive():
+        if self._updating or (self._worker is not None and self._worker.is_alive()):
             return
         if not dl.find_ffmpeg():
             self._show_message("Потрібен FFmpeg", dl.FFMPEG_INSTALL_HINT)
@@ -316,7 +350,20 @@ class App(ctk.CTk):
         self.after(100, self._poll_events)
 
     def _handle_event(self, kind: str, data: dict) -> None:
-        if kind == "log":
+        if kind == "update_check":
+            self._on_update_check(data)
+        elif kind == "update_progress":
+            total, done = data["total"], data["done"]
+            if total:
+                self.progress.set(min(done / total, 1))
+                self.status_label.configure(
+                    text=f"Завантаження оновлення… {done * 100 // total}% "
+                         f"({done / 1048576:.1f} з {total / 1048576:.1f} МБ)")
+        elif kind == "update_ready":
+            self._on_update_ready(data["path"])
+        elif kind == "update_failed":
+            self._on_update_failed(data["message"])
+        elif kind == "log":
             self._log(data["message"], data.get("level", "info"))
         elif kind == "progress":
             total = data.get("total")
@@ -353,6 +400,122 @@ class App(ctk.CTk):
             self._worker = None
             self._update_controls()
 
+    # ------------------------------------------------------------- update --
+
+    def _check_updates(self, manual: bool = False) -> None:
+        if self._checking_update or self._updating:
+            return
+        self._checking_update = True
+        self._update_controls()
+
+        def work() -> None:
+            try:
+                release = updater.check_for_update(__version__)
+                self._events.put(("update_check", {"release": release, "manual": manual}))
+            except Exception as exc:  # noqa: BLE001 — мережа недоступна тощо
+                self._events.put(("update_check", {"error": str(exc), "manual": manual}))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_check(self, data: dict) -> None:
+        self._checking_update = False
+        self._update_controls()
+        manual = data.get("manual")
+        if "error" in data:
+            self._log(f"Не вдалося перевірити оновлення: {data['error']}")
+            if manual:
+                self._show_message("Оновлення", "Не вдалося перевірити оновлення. "
+                                                "Перевірте підключення до інтернету.")
+            return
+        release: updater.ReleaseInfo | None = data["release"]
+        if release is None:
+            if manual:
+                self._show_message("Оновлення",
+                                   f"У вас остання версія ({__version__}).")
+            return
+        self._release = release
+        self.update_label.configure(
+            text=f"Доступна нова версія {release.version} (у вас {__version__})")
+        self.update_button.configure(text=f"Оновити до версії {release.version}")
+        self.update_frame.grid(row=6, column=0, sticky="ew", padx=16, pady=(12, 0))
+        self._update_controls()
+        self._log(f"Доступна нова версія {release.version}.")
+
+    def _show_release_notes(self) -> None:
+        if not self._release:
+            return
+        win = ctk.CTkToplevel(self)
+        win.title(f"Що нового у версії {self._release.version}")
+        win.geometry("560x420")
+        win.transient(self)
+        box = ctk.CTkTextbox(win, wrap="word")
+        box.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        box.insert("end", self._release.notes or "Опис змін відсутній.")
+        box.insert("end", f"\n\n{self._release.page_url}")
+        box.configure(state="disabled")
+        ctk.CTkButton(win, text="OK", width=100, command=win.destroy).pack(pady=(0, 16))
+        win.after(50, win.grab_set)
+
+    def _install_update(self) -> None:
+        release = self._release
+        if release is None or self._updating:
+            return
+        if self._worker is not None and self._worker.is_alive():
+            self._show_message("Оновлення", "Зараз іде завантаження відео. Дочекайтеся "
+                                            "його завершення або скасуйте, а потім "
+                                            "оновіть програму.")
+            return
+        if not updater.is_frozen():
+            self._show_message(
+                "Оновлення",
+                f"Доступна версія {release.version}, але програма запущена з вихідного "
+                "коду. Оновіть її командою\n\n    git pull\n    pip install -r "
+                "requirements.txt\n\nабо завантажте exe зі сторінки релізів:\n"
+                f"{release.page_url}")
+            return
+        exe = updater.current_exe()
+        new_exe, _, _ = updater.update_paths(exe)
+        self._updating = True
+        self._update_cancel.clear()
+        self._update_controls()
+        self.progress.set(0)
+        self.status_label.configure(text=f"Завантаження оновлення {release.version}…")
+        self._log(f"Завантаження версії {release.version}…")
+
+        def progress(done: int, total: int) -> None:
+            self._events.put(("update_progress", {"done": done, "total": total}))
+
+        def work() -> None:
+            try:
+                updater.download_update(release, new_exe, on_progress=progress,
+                                        is_cancelled=self._update_cancel.is_set)
+                self._events.put(("update_ready", {"path": new_exe}))
+            except Exception as exc:  # noqa: BLE001
+                self._events.put(("update_failed", {"message": str(exc)}))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_ready(self, path: Path) -> None:
+        try:
+            updater.launch_update_helper(path)
+        except OSError as exc:
+            path.unlink(missing_ok=True)
+            self._on_update_failed(f"Не вдалося запустити оновлення: {exc}")
+            return
+        self._log("Оновлення завантажено. Програма перезапуститься…")
+        self.update()
+        self._save_settings()
+        self.destroy()
+
+    def _on_update_failed(self, message: str) -> None:
+        self._updating = False
+        self._update_controls()
+        self.status_label.configure(text="Оновлення не вдалося")
+        self._log(message, "error")
+        page = self._release.page_url if self._release else updater.RELEASES_PAGE
+        self._show_message("Оновлення", f"{message}\n\nНову версію можна завантажити "
+                                        f"вручну:\n{page}")
+
     def _save_settings(self) -> None:
         data = {
             "output_dir": self.folder_entry.get().strip(),
@@ -368,6 +531,7 @@ class App(ctk.CTk):
 
     def _on_close(self) -> None:
         self._save_settings()
+        self._update_cancel.set()
         if self._downloader:
             self._downloader.cancel()
         self.destroy()
@@ -391,6 +555,7 @@ def self_test(report_path: str) -> int:
         app = App()
         app.update()
         report["window"] = app.title()
+        report["version"] = __version__
         app.destroy()
         report["ok"] = report["ejs_files"] > 0
     except Exception:  # noqa: BLE001

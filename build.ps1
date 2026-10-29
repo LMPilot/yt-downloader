@@ -34,12 +34,18 @@ if (-not $SkipTests) {
     Invoke-Checked python @("-m", "pytest", "-q")
 }
 
-Write-Host "==> Збірка yt-downloader.exe" -ForegroundColor Cyan
+$version = (& python -c "from version import __version__; print(__version__)").Trim()
+if ($LASTEXITCODE -ne 0) { throw "Не вдалося прочитати версію з version.py" }
+$versionFile = Join-Path ([IO.Path]::GetTempPath()) "yt-downloader-version-info.txt"
+Invoke-Checked python @("version_info.py", $versionFile)
+
+Write-Host "==> Збірка yt-downloader.exe $version" -ForegroundColor Cyan
 Invoke-Checked python @(
     "-m", "PyInstaller",
     "--noconfirm", "--clean",
     "--onefile", "--windowed",
     "--name", "yt-downloader",
+    "--version-file", $versionFile,
     "--collect-data", "customtkinter",
     "--collect-submodules", "yt_dlp",
     "--collect-all", "yt_dlp_ejs",
@@ -73,5 +79,10 @@ if ($ffmpeg) {
     }
 }
 
+# Контрольна сума для автооновлення (формат sha256sum: «<hash>  <файл>»).
+$hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+[IO.File]::WriteAllText("$exe.sha256", "$hash  yt-downloader.exe`n", [Text.Encoding]::ASCII)
+
 $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-Write-Host "Готово: $exe ($size МБ)" -ForegroundColor Green
+Write-Host "Готово: $exe, версія $version ($size МБ)" -ForegroundColor Green
+Write-Host "SHA256: $hash"
