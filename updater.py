@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,8 +127,13 @@ def _open(url: str, timeout: float, accept: str = "*/*"):
 
 def fetch_latest_release(timeout: float = CHECK_TIMEOUT) -> ReleaseInfo | None:
     """Останній реліз або ``None``. Мережеві помилки — ``OSError``/``ValueError``."""
-    with _open(LATEST_RELEASE_API, timeout, "application/vnd.github+json") as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with _open(LATEST_RELEASE_API, timeout, "application/vnd.github+json") as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:  # у репозиторії ще немає жодного релізу
+            return None
+        raise
     return parse_release(data)
 
 

@@ -367,3 +367,24 @@ def test_helper_command_quotes_special_paths(monkeypatch):
     assert u.helper_command(script) == (
         r'"C:\Windows\system32\cmd.exe" /d /s /c ""C:\Program Files (x86)\A & B'
         r'\yt-downloader-update.cmd""')
+
+
+def test_fetch_latest_release_no_releases(monkeypatch):
+    import urllib.error
+
+    def not_found(url, timeout, accept="*/*"):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(u, "_open", not_found)
+    assert u.fetch_latest_release() is None
+
+
+def test_fetch_latest_release_other_http_error(monkeypatch):
+    import urllib.error
+
+    def forbidden(url, timeout, accept="*/*"):
+        raise urllib.error.HTTPError(url, 403, "rate limit", {}, None)
+
+    monkeypatch.setattr(u, "_open", forbidden)
+    with pytest.raises(OSError):
+        u.fetch_latest_release()
