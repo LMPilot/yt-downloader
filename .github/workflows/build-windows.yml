@@ -1,0 +1,113 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches:
+      - main
+      - claude/sweet-johnson-36attp
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # потрібно лише для створення релізу на тегах v*
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt pyinstaller
+
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (python -c "from version import __version__; print(__version__)").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read version.py" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = $env:GITHUB_REF_NAME
+            if ($tag -ne "v$version") {
+              throw "Tag $tag does not match version.py ($version). Bump __version__ or fix the tag."
+            }
+          }
+          Write-Host "Version: $version"
+
+      - name: Run tests and build exe
+        shell: pwsh
+        run: ./build.ps1 -SkipInstall
+
+      - name: Smoke test exe
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "self-test.json"
+          $p = Start-Process -FilePath dist\yt-downloader.exe `
+            -ArgumentList "--self-test", $report -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report -Encoding utf8 }
+          if ($p.ExitCode -ne 0) { throw "Self-test failed with exit code $($p.ExitCode)" }
+          $info = Get-Content $report -Encoding utf8 -Raw | ConvertFrom-Json
+          if ($info.version -ne "${{ steps.version.outputs.version }}") {
+            throw "exe reports version $($info.version), expected ${{ steps.version.outputs.version }}"
+          }
+          $fileVersion = (Get-Item dist\yt-downloader.exe).VersionInfo.ProductVersion
+          if ($fileVersion -ne "${{ steps.version.outputs.version }}") {
+            throw "exe file version is '$fileVersion', expected ${{ steps.version.outputs.version }}"
+          }
+          $expected = (Get-Content dist\yt-downloader.exe.sha256).Split()[0]
+          $actual = (Get-FileHash dist\yt-downloader.exe -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "sha256 file mismatch" }
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: yt-downloader-windows
+          path: |
+            dist/yt-downloader.exe
+            dist/yt-downloader.exe.sha256
+          if-no-files-found: error
+
+      - name: Package exe with ffmpeg
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $base = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest $base -OutFile $zip
+          $expected = (Invoke-WebRequest "$base.sha256").Content.Trim().Split()[0]
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "ffmpeg checksum mismatch: $actual != $expected" }
+          $ffDir = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive $zip -DestinationPath $ffDir
+          $ffmpeg = Get-ChildItem $ffDir -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $pkg = Join-Path $env:RUNNER_TEMP "yt-downloader"
+          New-Item -ItemType Directory $pkg | Out-Null
+          Copy-Item dist\yt-downloader.exe, $ffmpeg.FullName $pkg
+          Compress-Archive -Path "$pkg\*" -DestinationPath dist\yt-downloader-windows-with-ffmpeg.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Програма оновлюється саме з yt-downloader.exe + .sha256 цього релізу.
+          files: |
+            dist/yt-downloader.exe
+            dist/yt-downloader.exe.sha256
+            dist/yt-downloader-windows-with-ffmpeg.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: false
+          make_latest: true
