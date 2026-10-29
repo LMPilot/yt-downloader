@@ -242,7 +242,8 @@ def test_update_script_contents():
     lines = script.split("\r\n")
     assert lines[0] == "@echo off"
     # чекає саме на наш PID
-    assert 'tasklist /NH /FI "PID eq 4321" 2>nul | find " 4321 " >nul' in lines
+    assert ('"%SYS%\\tasklist.exe" /NH /FI "PID eq 4321" 2>nul '
+            '| "%SYS%\\find.exe" " 4321 " >nul') in lines
     # резервна копія → встановлення → відкат → запуск → самовидалення
     order = [
         'move /y "%YTD_UPDATE_TARGET%" "%YTD_UPDATE_BACKUP%" >nul 2>&1',
