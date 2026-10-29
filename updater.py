@@ -306,6 +306,16 @@ def clean_environment(env: dict[str, str], meipass: str | None) -> dict[str, str
     return result
 
 
+def helper_command(script: Path) -> str:
+    """Командний рядок для запуску скрипта.
+
+    ``/s`` + подвійні лапки: без них ``cmd /c "шлях"`` губить лапки, якщо в шляху
+    є ``&``, ``(`` чи ``)`` (наприклад, ``Program Files (x86)``).
+    """
+    comspec = os.environ.get("ComSpec") or "cmd.exe"
+    return f'"{comspec}" /d /s /c ""{script}""'
+
+
 def launch_update_helper(new_exe: Path, exe: Path | None = None) -> Path:
     """Записує скрипт заміни поруч із exe і запускає його у фоні.
 
@@ -319,7 +329,7 @@ def launch_update_helper(new_exe: Path, exe: Path | None = None) -> Path:
     flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     subprocess.Popen(  # noqa: S603
-        ["cmd.exe", "/d", "/c", str(script)], cwd=str(exe.parent), env=env,
+        helper_command(script), cwd=str(exe.parent), env=env,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, creationflags=flags)
     return script

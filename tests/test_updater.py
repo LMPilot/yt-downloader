@@ -294,7 +294,7 @@ def test_launch_update_helper(monkeypatch, tmp_path):
     script = u.launch_update_helper(new, exe)
     assert script == tmp_path / u.HELPER_NAME
     assert f"PID eq {os.getpid()}" in script.read_text(encoding="ascii")
-    assert calls["args"] == ["cmd.exe", "/d", "/c", str(script)]
+    assert calls["args"] == u.helper_command(script)
     env = calls["env"]
     assert env[u.ENV_TARGET] == str(exe)
     assert env[u.ENV_NEW] == str(new)
@@ -344,10 +344,12 @@ def test_update_script_runs_in_cmd(tmp_path):
     env = dict(os.environ, **{u.ENV_TARGET: str(exe), u.ENV_NEW: str(new),
                               u.ENV_BACKUP: str(backup)})
     started = time.monotonic()
-    subprocess.run(["cmd.exe", "/d", "/c", str(script)], env=env, cwd=str(folder),
-                   timeout=120, check=False,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    assert sleeper.poll() is not None
+    log = tmp_path / "cmd.log"
+    with open(log, "wb") as out:
+        subprocess.run(u.helper_command(script), env=env, cwd=str(folder),
+                       timeout=120, check=False, stdout=out, stderr=subprocess.STDOUT)
+    output = log.read_bytes().decode("oem", "replace")
+    assert sleeper.poll() is not None, output
     assert time.monotonic() - started >= 2  # справді чекав на процес
     assert exe.read_bytes() == new_bytes
     assert backup.read_bytes() == old_bytes
@@ -357,3 +359,11 @@ def test_update_script_runs_in_cmd(tmp_path):
             break
         time.sleep(0.1)
     assert not script.exists()
+
+
+def test_helper_command_quotes_special_paths(monkeypatch):
+    monkeypatch.setenv("ComSpec", r"C:\Windows\system32\cmd.exe")
+    script = Path(r"C:\Program Files (x86)\A & B\yt-downloader-update.cmd")
+    assert u.helper_command(script) == (
+        r'"C:\Windows\system32\cmd.exe" /d /s /c ""C:\Program Files (x86)\A & B'
+        r'\yt-downloader-update.cmd""')
