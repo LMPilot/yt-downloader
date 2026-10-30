@@ -14,6 +14,18 @@ APP_DIR_NAME = "yt-downloader"
 SETTINGS_FILENAME = "settings.json"
 _IS_WINDOWS = os.name == "nt"
 
+# Значення, які мають лише кілька допустимих варіантів, і їхні типові значення.
+# Тема — режим ``customtkinter.set_appearance_mode``.
+THEMES = ("dark", "light", "system")
+MEDIA_TYPES = ("video", "audio")
+AUDIO_FORMATS = ("mp3", "m4a", "opus")
+DEFAULTS = {
+    "theme": "dark",
+    "media": "video",
+    "audio_format": "mp3",
+}
+_CHOICES = {"theme": THEMES, "media": MEDIA_TYPES, "audio_format": AUDIO_FORMATS}
+
 
 def config_dir() -> Path:
     appdata = os.environ.get("APPDATA")
@@ -48,3 +60,19 @@ def save_settings(data: dict, path: str | os.PathLike | None = None) -> bool:
     except OSError:
         return False
     return True
+
+
+def with_defaults(data: dict) -> dict:
+    """Копія налаштувань, де відсутні чи невідомі значення замінено типовими.
+
+    Налаштування версії 0.1.0 зберігали аудіорежим як ``quality == "audio"``;
+    тепер це ``media == "audio"``, а ``quality`` — лише якість відео.
+    """
+    result = dict(data)
+    if result.get("quality") == "audio":
+        result.pop("quality")
+        result.setdefault("media", "audio")
+    for key, default in DEFAULTS.items():
+        if result.get(key) not in _CHOICES[key]:
+            result[key] = default
+    return result

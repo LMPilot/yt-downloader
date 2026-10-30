@@ -35,6 +35,15 @@ QUALITY_BEST = "best"
 QUALITY_AUDIO = "audio"
 VIDEO_HEIGHTS = ("2160", "1440", "1080", "720", "480", "360")
 AUDIO_BITRATES = ("320", "192", "128")
+AUDIO_FORMATS = ("mp3", "m4a", "opus")
+DEFAULT_AUDIO_FORMAT = "mp3"
+# Для M4A/OPUS спершу беремо доріжку в тому ж кодеку — тоді FFmpeg лише
+# переносить її в контейнер без перекодування й втрати якості.
+_AUDIO_SOURCE = {
+    "mp3": "bestaudio/best",
+    "m4a": "bestaudio[ext=m4a]/bestaudio/best",
+    "opus": "bestaudio[acodec=opus]/bestaudio/best",
+}
 
 # Максимальна довжина назви папки/файлу. Windows обмежує повний шлях
 # ~260 символами, а yt-dlp ще додає суфікси на кшталт ".f137.mp4.part".
@@ -42,7 +51,7 @@ MAX_NAME_LENGTH = 80
 
 FFMPEG_INSTALL_HINT = (
     "FFmpeg не знайдено. Він потрібен, щоб зʼєднати відео й аудіо в MP4 "
-    "та конвертувати аудіо в MP3.\n\n"
+    "та зберегти аудіо в MP3 / M4A / OPUS.\n\n"
     "Windows: відкрийте PowerShell і виконайте\n"
     "    winget install Gyan.FFmpeg\n"
     "після чого перезапустіть програму.\n\n"
@@ -155,18 +164,24 @@ def normalize_url(url: str) -> str:
     return url
 
 
-def build_format_options(quality: str, audio_bitrate: str = "192") -> dict:
-    """Параметри yt-dlp для вибраної якості."""
+def build_format_options(quality: str, audio_bitrate: str = "192",
+                         audio_format: str = DEFAULT_AUDIO_FORMAT) -> dict:
+    """Параметри yt-dlp для вибраної якості.
+
+    ``quality == QUALITY_AUDIO`` — лише аудіо у форматі ``audio_format``
+    (MP3, M4A або OPUS); ``audio_bitrate`` застосовується лише до MP3.
+    """
     if quality == QUALITY_AUDIO:
-        if audio_bitrate not in AUDIO_BITRATES:
-            raise ValueError(f"Невідомий бітрейт: {audio_bitrate}")
+        if audio_format not in AUDIO_FORMATS:
+            raise ValueError(f"Невідомий аудіоформат: {audio_format}")
+        postprocessor = {"key": "FFmpegExtractAudio", "preferredcodec": audio_format}
+        if audio_format == "mp3":
+            if audio_bitrate not in AUDIO_BITRATES:
+                raise ValueError(f"Невідомий бітрейт: {audio_bitrate}")
+            postprocessor["preferredquality"] = audio_bitrate
         return {
-            "format": "bestaudio/best",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": audio_bitrate,
-            }],
+            "format": _AUDIO_SOURCE[audio_format],
+            "postprocessors": [postprocessor],
         }
     if quality == QUALITY_BEST:
         sort = ["res", "ext:mp4:m4a"]
@@ -207,6 +222,7 @@ class DownloadOptions:
     count: int = 10
     quality: str = QUALITY_BEST
     audio_bitrate: str = "192"
+    audio_format: str = DEFAULT_AUDIO_FORMAT
     save_info: bool = True
     output_dir: str = DEFAULT_OUTPUT_DIR
 
@@ -278,7 +294,7 @@ class Downloader:
             "progress_hooks": [self._progress_hook],
             "postprocessor_hooks": [self._postprocessor_hook],
         }
-        params.update(build_format_options(opts.quality, opts.audio_bitrate))
+        params.update(build_format_options(opts.quality, opts.audio_bitrate, opts.audio_format))
         if ffmpeg_path:
             params["ffmpeg_location"] = ffmpeg_path
 

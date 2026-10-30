@@ -146,11 +146,41 @@ def test_format_options_audio():
     assert pp["preferredquality"] == "320"
 
 
+@pytest.mark.parametrize("fmt, source", [
+    ("mp3", "bestaudio/best"),
+    ("m4a", "bestaudio[ext=m4a]/bestaudio/best"),
+    ("opus", "bestaudio[acodec=opus]/bestaudio/best"),
+])
+def test_format_options_audio_formats(fmt, source):
+    opts = d.build_format_options(d.QUALITY_AUDIO, "128", fmt)
+    assert opts["format"] == source
+    assert "merge_output_format" not in opts
+    [pp] = opts["postprocessors"]
+    assert pp["key"] == "FFmpegExtractAudio"
+    assert pp["preferredcodec"] == fmt
+    # Бітрейт задається лише для MP3; M4A/OPUS без перекодування, якщо можна.
+    assert pp.get("preferredquality") == ("128" if fmt == "mp3" else None)
+
+
+def test_format_options_audio_default_is_mp3():
+    pp = d.build_format_options(d.QUALITY_AUDIO)["postprocessors"][0]
+    assert pp["preferredcodec"] == "mp3"
+    assert pp["preferredquality"] == "192"
+    assert d.DownloadOptions(url="x").audio_format == "mp3"
+
+
+def test_format_options_bitrate_ignored_for_other_formats():
+    # Бітрейт MP3 не має значення для M4A/OPUS — навіть невідомий не є помилкою.
+    assert d.build_format_options(d.QUALITY_AUDIO, "64", "opus")
+
+
 def test_format_options_invalid():
     with pytest.raises(ValueError):
         d.build_format_options("999")
     with pytest.raises(ValueError):
         d.build_format_options("audio", "64")
+    with pytest.raises(ValueError):
+        d.build_format_options("audio", "192", "flac")
 
 
 def test_ydl_params_modes(tmp_path):
@@ -164,6 +194,41 @@ def test_ydl_params_modes(tmp_path):
     assert params()["ignoreerrors"] is True
     with pytest.raises(ValueError):
         params(mode=d.MODE_COUNT, count=0)
+
+
+@pytest.mark.parametrize("mode", [d.MODE_SINGLE, d.MODE_COUNT, d.MODE_ALL])
+@pytest.mark.parametrize("fmt", d.AUDIO_FORMATS)
+def test_ydl_params_audio_every_mode(tmp_path, mode, fmt):
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path), mode=mode, count=3,
+                                        quality=d.QUALITY_AUDIO, audio_format=fmt,
+                                        audio_bitrate="320"))
+    params = dl.build_ydl_params()
+    # Кожен файл — у власній підпапці, як і для відео.
+    assert params["outtmpl"]["default"] == "%(yt_folder)s/%(yt_folder)s.%(ext)s"
+    assert params["postprocessors"][0]["preferredcodec"] == fmt
+    assert "format_sort" not in params
+
+
+@pytest.mark.parametrize("fmt", d.AUDIO_FORMATS)
+def test_audio_params_accepted_by_yt_dlp(tmp_path, fmt):
+    import yt_dlp
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path),
+                                        quality=d.QUALITY_AUDIO, audio_format=fmt))
+    with yt_dlp.YoutubeDL(dl.build_ydl_params()) as ydl:
+        [pp] = ydl._pps["post_process"]
+        assert type(pp).__name__ == "FFmpegExtractAudioPP"
+        assert pp.mapping == fmt
+
+
+def test_finish_pp_writes_info_next_to_audio(tmp_path):
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path),
+                                        quality=d.QUALITY_AUDIO))
+    folder = tmp_path / "Пісня"
+    folder.mkdir()
+    info = {"filepath": str(folder / "Пісня.mp3"), "title": "Пісня", "description": "Опис"}
+    d._FinishPP(dl).run(info)
+    assert (folder / "info.txt").read_text(encoding="utf-8") == "Пісня\n\n\n\nОпис"
+    assert dl.result.downloaded == 1
 
 
 def test_params_accepted_by_yt_dlp(tmp_path):

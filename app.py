@@ -25,7 +25,16 @@ MODE_LABELS = {
 QUALITY_LABELS = {
     "Найкраща": dl.QUALITY_BEST,
     **{f"{h}p": h for h in dl.VIDEO_HEIGHTS},
-    "Лише аудіо (MP3)": dl.QUALITY_AUDIO,
+}
+MEDIA_LABELS = {
+    "🎬 Відео": "video",
+    "🎵 Лише аудіо": "audio",
+}
+AUDIO_FORMAT_LABELS = {f.upper(): f for f in dl.AUDIO_FORMATS}
+THEME_LABELS = {
+    "Темна": "dark",
+    "Світла": "light",
+    "Системна": "system",
 }
 LOG_PREFIX = {"warning": "⚠ ", "error": "✖ "}
 
@@ -52,8 +61,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"YouTube Downloader {__version__}")
-        self.geometry("780x700")
-        self.minsize(660, 620)
+        self.geometry("780x760")
+        self.minsize(660, 680)
 
         self._events: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
@@ -62,16 +71,28 @@ class App(ctk.CTk):
         self._checking_update = False
         self._updating = False
         self._update_cancel = threading.Event()
-        saved = settings.load_settings()
+        saved = settings.with_defaults(settings.load_settings())
+        ctk.set_appearance_mode(saved["theme"])
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        self.grid_rowconfigure(6, weight=1)
         pad = {"padx": 16, "pady": (12, 0)}
+
+        # --- тема ------------------------------------------------------------
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 0))
+        top.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(top, text="Тема:", text_color=("gray35", "gray65")).grid(
+            row=0, column=1, padx=(0, 6))
+        self.theme_var = ctk.StringVar(value=_label_for(THEME_LABELS, saved["theme"], "Темна"))
+        ctk.CTkOptionMenu(top, values=list(THEME_LABELS), variable=self.theme_var,
+                          width=110, height=26, command=self._change_theme,
+                          ).grid(row=0, column=2)
 
         # --- папка -----------------------------------------------------------
         folder_frame = ctk.CTkFrame(self, border_width=2,
                                     border_color=("#3b8ed0", "#1f6aa5"))
-        folder_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 0))
+        folder_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 0))
         folder_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(folder_frame, text="📁 Папка для завантаження",
                      font=ctk.CTkFont(size=15, weight="bold")).grid(
@@ -93,7 +114,7 @@ class App(ctk.CTk):
 
         # --- посилання -------------------------------------------------------
         url_frame = ctk.CTkFrame(self, fg_color="transparent")
-        url_frame.grid(row=1, column=0, sticky="ew", **pad)
+        url_frame.grid(row=2, column=0, sticky="ew", **pad)
         url_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(url_frame, text="Посилання на відео, плейлист або канал:").grid(
             row=0, column=0, columnspan=2, sticky="w")
@@ -105,7 +126,7 @@ class App(ctk.CTk):
 
         # --- режим -----------------------------------------------------------
         mode_frame = ctk.CTkFrame(self)
-        mode_frame.grid(row=2, column=0, sticky="ew", **pad)
+        mode_frame.grid(row=3, column=0, sticky="ew", **pad)
         ctk.CTkLabel(mode_frame, text="Режим:").grid(row=0, column=0, padx=12, pady=10)
         self.mode_var = ctk.StringVar(
             value=_label_for(MODE_LABELS, saved.get("mode"), "Одне відео"))
@@ -118,33 +139,60 @@ class App(ctk.CTk):
         self.count_entry.insert(0, str(saved.get("count") or 10))
         self.count_entry.grid(row=0, column=3, padx=(0, 12))
 
-        # --- якість ----------------------------------------------------------
+        # --- відео / аудіо ---------------------------------------------------
         quality_frame = ctk.CTkFrame(self)
-        quality_frame.grid(row=3, column=0, sticky="ew", **pad)
-        ctk.CTkLabel(quality_frame, text="Якість:").grid(row=0, column=0, padx=12, pady=10)
+        quality_frame.grid(row=4, column=0, sticky="ew", **pad)
+        media_row = ctk.CTkFrame(quality_frame, fg_color="transparent")
+        media_row.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(media_row, text="Завантажити:").grid(row=0, column=0, padx=(12, 8),
+                                                         pady=10)
+        self.media_var = ctk.StringVar(value=_label_for(MEDIA_LABELS, saved["media"],
+                                                        "🎬 Відео"))
+        ctk.CTkSegmentedButton(
+            media_row, values=list(MEDIA_LABELS), variable=self.media_var,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda _: self._update_controls(),
+        ).grid(row=0, column=1, pady=10)
+
+        # Налаштування відео: якість.
+        self.video_options = ctk.CTkFrame(quality_frame, fg_color="transparent")
+        ctk.CTkLabel(self.video_options, text="Якість відео:").grid(row=0, column=0,
+                                                                    padx=(12, 8))
         self.quality_var = ctk.StringVar(
             value=_label_for(QUALITY_LABELS, saved.get("quality"), "Найкраща"))
-        ctk.CTkOptionMenu(quality_frame, values=list(QUALITY_LABELS),
-                          variable=self.quality_var,
-                          command=lambda _: self._update_controls(),
-                          ).grid(row=0, column=1, pady=10)
-        ctk.CTkLabel(quality_frame, text="Бітрейт MP3:").grid(row=0, column=2, padx=(16, 4))
+        self.quality_menu = ctk.CTkOptionMenu(self.video_options, values=list(QUALITY_LABELS),
+                                              variable=self.quality_var)
+        self.quality_menu.grid(row=0, column=1)
+
+        # Налаштування аудіо: формат і бітрейт MP3.
+        self.audio_options = ctk.CTkFrame(quality_frame, fg_color="transparent")
+        ctk.CTkLabel(self.audio_options, text="Формат:").grid(row=0, column=0, padx=(12, 8))
+        self.audio_format_var = ctk.StringVar(
+            value=_label_for(AUDIO_FORMAT_LABELS, saved["audio_format"], "MP3"))
+        self.audio_format_menu = ctk.CTkOptionMenu(
+            self.audio_options, values=list(AUDIO_FORMAT_LABELS),
+            variable=self.audio_format_var, width=90,
+            command=lambda _: self._update_controls())
+        self.audio_format_menu.grid(row=0, column=1)
+        ctk.CTkLabel(self.audio_options, text="Бітрейт MP3:").grid(row=0, column=2,
+                                                                   padx=(16, 4))
         bitrate = saved.get("audio_bitrate")
         self.bitrate_var = ctk.StringVar(
             value=bitrate if bitrate in dl.AUDIO_BITRATES else "192")
         self.bitrate_menu = ctk.CTkOptionMenu(
-            quality_frame, values=[f"{b}" for b in dl.AUDIO_BITRATES],
+            self.audio_options, values=[f"{b}" for b in dl.AUDIO_BITRATES],
             variable=self.bitrate_var, width=80)
         self.bitrate_menu.grid(row=0, column=3)
-        ctk.CTkLabel(quality_frame, text="кбіт/с").grid(row=0, column=4, padx=(4, 12))
+        ctk.CTkLabel(self.audio_options, text="кбіт/с").grid(row=0, column=4, padx=(4, 0))
+
         self.save_info_var = ctk.BooleanVar(value=saved.get("save_info", True) is not False)
-        ctk.CTkCheckBox(quality_frame, text="Зберігати назву та опис",
-                        variable=self.save_info_var).grid(row=1, column=0, columnspan=5,
+        ctk.CTkCheckBox(quality_frame, text="Зберігати назву та опис (info.txt)",
+                        variable=self.save_info_var).grid(row=2, column=0,
                                                           sticky="w", padx=12, pady=(0, 10))
 
         # --- прогрес ---------------------------------------------------------
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
-        progress_frame.grid(row=4, column=0, sticky="ew", **pad)
+        progress_frame.grid(row=5, column=0, sticky="ew", **pad)
         progress_frame.grid_columnconfigure(0, weight=1)
         self.status_label = ctk.CTkLabel(progress_frame, text="Готово до завантаження",
                                          anchor="w")
@@ -155,7 +203,7 @@ class App(ctk.CTk):
 
         # --- журнал ----------------------------------------------------------
         self.log_box = ctk.CTkTextbox(self, wrap="word")
-        self.log_box.grid(row=5, column=0, sticky="nsew", padx=16, pady=(12, 0))
+        self.log_box.grid(row=6, column=0, sticky="nsew", padx=16, pady=(12, 0))
         self.log_box.configure(state="disabled")
 
         # --- оновлення (показується, коли є нова версія) ----------------------
@@ -173,7 +221,7 @@ class App(ctk.CTk):
 
         # --- кнопки ----------------------------------------------------------
         bottom = ctk.CTkFrame(self, fg_color="transparent")
-        bottom.grid(row=7, column=0, sticky="ew", padx=16, pady=12)
+        bottom.grid(row=8, column=0, sticky="ew", padx=16, pady=12)
         bottom.grid_columnconfigure(2, weight=1)
         ctk.CTkLabel(bottom, text=f"Версія {__version__}",
                      text_color=("gray35", "gray65")).grid(row=0, column=0, sticky="w")
@@ -205,14 +253,27 @@ class App(ctk.CTk):
         running = downloading or self._updating
         count_on = MODE_LABELS[self.mode_var.get()] == dl.MODE_COUNT and not running
         self.count_entry.configure(state="normal" if count_on else "disabled")
-        audio = QUALITY_LABELS[self.quality_var.get()] == dl.QUALITY_AUDIO
-        self.bitrate_menu.configure(state="normal" if audio and not running else "disabled")
+        if self._audio_mode():
+            self.video_options.grid_remove()
+            self.audio_options.grid(row=1, column=0, sticky="w", pady=(0, 10))
+        else:
+            self.audio_options.grid_remove()
+            self.video_options.grid(row=1, column=0, sticky="w", pady=(0, 10))
+        mp3 = AUDIO_FORMAT_LABELS[self.audio_format_var.get()] == "mp3"
+        self.bitrate_menu.configure(state="normal" if mp3 and not running else "disabled")
         self.start_button.configure(state="disabled" if running else "normal")
         self.cancel_button.configure(state="normal" if downloading else "disabled",
                                      fg_color="#b03a2e" if downloading else "gray50")
         self.update_button.configure(state="disabled" if running else "normal")
         self.check_button.configure(
             state="disabled" if self._updating or self._checking_update else "normal")
+
+    def _audio_mode(self) -> bool:
+        return MEDIA_LABELS[self.media_var.get()] == "audio"
+
+    def _change_theme(self, label: str) -> None:
+        ctk.set_appearance_mode(THEME_LABELS[label])
+        self._save_settings()
 
     def _log(self, message: str, level: str = "info") -> None:
         self.log_box.configure(state="normal")
@@ -298,8 +359,10 @@ class App(ctk.CTk):
             return None
         return dl.DownloadOptions(
             url=url, mode=mode, count=count,
-            quality=QUALITY_LABELS[self.quality_var.get()],
+            quality=(dl.QUALITY_AUDIO if self._audio_mode()
+                     else QUALITY_LABELS[self.quality_var.get()]),
             audio_bitrate=self.bitrate_var.get(),
+            audio_format=AUDIO_FORMAT_LABELS[self.audio_format_var.get()],
             save_info=self.save_info_var.get(),
             output_dir=folder,
         )
@@ -437,7 +500,7 @@ class App(ctk.CTk):
         self.update_label.configure(
             text=f"Доступна нова версія {release.version} (у вас {__version__})")
         self.update_button.configure(text=f"Оновити до версії {release.version}")
-        self.update_frame.grid(row=6, column=0, sticky="ew", padx=16, pady=(12, 0))
+        self.update_frame.grid(row=7, column=0, sticky="ew", padx=16, pady=(12, 0))
         self._update_controls()
         self._log(f"Доступна нова версія {release.version}.")
 
@@ -520,8 +583,11 @@ class App(ctk.CTk):
         data = {
             "output_dir": self.folder_entry.get().strip(),
             "mode": MODE_LABELS[self.mode_var.get()],
+            "media": MEDIA_LABELS[self.media_var.get()],
             "quality": QUALITY_LABELS[self.quality_var.get()],
+            "audio_format": AUDIO_FORMAT_LABELS[self.audio_format_var.get()],
             "audio_bitrate": self.bitrate_var.get(),
+            "theme": THEME_LABELS[self.theme_var.get()],
             "save_info": bool(self.save_info_var.get()),
         }
         count = self.count_entry.get().strip()
@@ -551,7 +617,6 @@ def self_test(report_path: str) -> int:
         report["yt_dlp"] = yt_dlp.version.__version__
         report["ejs_files"] = len(list(Path(yt_dlp_ejs.__file__).parent.rglob("*.js")))
         report["ffmpeg"] = dl.find_ffmpeg()
-        ctk.set_appearance_mode("system")
         app = App()
         app.update()
         report["window"] = app.title()
@@ -569,7 +634,6 @@ def self_test(report_path: str) -> int:
 def main() -> None:
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
         sys.exit(self_test(sys.argv[2]))
-    ctk.set_appearance_mode("system")
     ctk.set_default_color_theme("blue")
     App().mainloop()
 
