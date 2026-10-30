@@ -220,6 +220,37 @@ def test_audio_params_accepted_by_yt_dlp(tmp_path, fmt):
         assert pp.mapping == fmt
 
 
+@pytest.mark.parametrize("quality", [d.QUALITY_BEST, d.QUALITY_AUDIO])
+def test_ydl_params_thumbnail(tmp_path, quality):
+    def params(**kw):
+        return d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path),
+                                              quality=quality, **kw)).build_ydl_params()
+
+    on = params()  # типово прев'ю зберігається
+    assert on["writethumbnail"] is True
+    assert on["outtmpl"]["thumbnail"] == "%(yt_folder)s/preview.%(ext)s"
+    assert {"key": "FFmpegThumbnailsConvertor", "format": "jpg",
+            "when": "before_dl"} in on["postprocessors"]
+
+    off = params(save_thumbnail=False)
+    assert "writethumbnail" not in off
+    assert "thumbnail" not in off["outtmpl"]
+    assert all(pp["key"] != "FFmpegThumbnailsConvertor"
+               for pp in off.get("postprocessors", []))
+
+
+def test_thumbnail_params_accepted_by_yt_dlp(tmp_path):
+    import yt_dlp
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path),
+                                        quality=d.QUALITY_AUDIO))
+    with yt_dlp.YoutubeDL(dl.build_ydl_params()) as ydl:
+        [pp] = ydl._pps["before_dl"]
+        assert type(pp).__name__ == "FFmpegThumbnailsConvertorPP"
+        # Аудіо-постпроцесор і далі єдиний після завантаження.
+        [audio_pp] = ydl._pps["post_process"]
+        assert type(audio_pp).__name__ == "FFmpegExtractAudioPP"
+
+
 def test_finish_pp_writes_info_next_to_audio(tmp_path):
     dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path),
                                         quality=d.QUALITY_AUDIO))

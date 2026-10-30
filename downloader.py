@@ -26,6 +26,7 @@ from yt_dlp.postprocessor.common import PostProcessor
 
 DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "YT")
 INFO_FILENAME = "info.txt"
+THUMBNAIL_BASENAME = "preview"  # → preview.jpg у папці відео
 
 MODE_SINGLE = "single"  # одне відео
 MODE_COUNT = "count"    # N відео з каналу
@@ -224,6 +225,7 @@ class DownloadOptions:
     audio_bitrate: str = "192"
     audio_format: str = DEFAULT_AUDIO_FORMAT
     save_info: bool = True
+    save_thumbnail: bool = True
     output_dir: str = DEFAULT_OUTPUT_DIR
 
 
@@ -295,6 +297,16 @@ class Downloader:
             "postprocessor_hooks": [self._postprocessor_hook],
         }
         params.update(build_format_options(opts.quality, opts.audio_bitrate, opts.audio_format))
+        if opts.save_thumbnail:
+            # Найкраще прев'ю відео → preview.jpg у папці відео (WebP від
+            # YouTube конвертується в JPG, щоб відкривався будь-де).
+            params["writethumbnail"] = True
+            params["outtmpl"]["thumbnail"] = f"%(yt_folder)s/{THUMBNAIL_BASENAME}.%(ext)s"
+            params["postprocessors"] = [
+                *params.get("postprocessors", []),
+                {"key": "FFmpegThumbnailsConvertor", "format": "jpg",
+                 "when": "before_dl"},
+            ]
         if ffmpeg_path:
             params["ffmpeg_location"] = ffmpeg_path
 

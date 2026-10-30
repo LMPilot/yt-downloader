@@ -188,7 +188,12 @@ class App(ctk.CTk):
         self.save_info_var = ctk.BooleanVar(value=saved.get("save_info", True) is not False)
         ctk.CTkCheckBox(quality_frame, text="Зберігати назву та опис (info.txt)",
                         variable=self.save_info_var).grid(row=2, column=0,
-                                                          sticky="w", padx=12, pady=(0, 10))
+                                                          sticky="w", padx=12, pady=(0, 6))
+        self.save_thumbnail_var = ctk.BooleanVar(
+            value=saved.get("save_thumbnail", True) is not False)
+        ctk.CTkCheckBox(quality_frame, text="Зберігати прев'ю (preview.jpg)",
+                        variable=self.save_thumbnail_var).grid(row=3, column=0,
+                                                               sticky="w", padx=12, pady=(0, 10))
 
         # --- прогрес ---------------------------------------------------------
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -364,6 +369,7 @@ class App(ctk.CTk):
             audio_bitrate=self.bitrate_var.get(),
             audio_format=AUDIO_FORMAT_LABELS[self.audio_format_var.get()],
             save_info=self.save_info_var.get(),
+            save_thumbnail=self.save_thumbnail_var.get(),
             output_dir=folder,
         )
 
@@ -589,6 +595,7 @@ class App(ctk.CTk):
             "audio_bitrate": self.bitrate_var.get(),
             "theme": THEME_LABELS[self.theme_var.get()],
             "save_info": bool(self.save_info_var.get()),
+            "save_thumbnail": bool(self.save_thumbnail_var.get()),
         }
         count = self.count_entry.get().strip()
         if count.isdigit() and int(count) > 0:
