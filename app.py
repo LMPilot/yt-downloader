@@ -7,10 +7,12 @@ import queue
 import subprocess
 import sys
 import threading
+import tkinter
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
+from PIL import Image
 
 import downloader as dl
 import settings
@@ -37,6 +39,17 @@ THEME_LABELS = {
     "Системна": "system",
 }
 LOG_PREFIX = {"warning": "⚠ ", "error": "✖ "}
+APP_NAME = "YouTube Downloader"
+
+
+def resource_path(name: str) -> Path:
+    """Шлях до файлу з assets/: поруч із app.py або в розпакованому .exe."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "assets" / name
+
+
+ICON_ICO = resource_path("icon.ico")
+ICON_PNG = resource_path("icon.png")
 
 
 def _label_for(labels: dict, value, default: str) -> str:
@@ -60,7 +73,9 @@ def format_speed(speed: float | None) -> str:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title(f"YouTube Downloader {__version__}")
+        self.title(f"{APP_NAME} {__version__}")
+        self._icon_photo = None
+        self._set_window_icon(self)
         self.geometry("780x760")
         self.minsize(660, 680)
 
@@ -78,10 +93,17 @@ class App(ctk.CTk):
         self.grid_rowconfigure(6, weight=1)
         pad = {"padx": 16, "pady": (12, 0)}
 
-        # --- тема ------------------------------------------------------------
+        # --- заголовок і тема ------------------------------------------------
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 0))
         top.grid_columnconfigure(0, weight=1)
+        header_icon = None
+        if ICON_PNG.is_file():
+            # Той самий файл, що й іконка вікна/exe (tools/make_icon.py).
+            header_icon = ctk.CTkImage(Image.open(ICON_PNG), size=(28, 28))
+        ctk.CTkLabel(top, text=f"  {APP_NAME}", image=header_icon, compound="left",
+                     font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0,
+                                                                   sticky="w")
         ctk.CTkLabel(top, text="Тема:", text_color=("gray35", "gray65")).grid(
             row=0, column=1, padx=(0, 6))
         self.theme_var = ctk.StringVar(value=_label_for(THEME_LABELS, saved["theme"], "Темна"))
@@ -273,6 +295,21 @@ class App(ctk.CTk):
         self.check_button.configure(
             state="disabled" if self._updating or self._checking_update else "normal")
 
+    def _set_window_icon(self, win) -> None:
+        """Іконка вікна й панелі задач: .ico у Windows, інакше PNG."""
+        try:
+            if sys.platform == "win32" and ICON_ICO.is_file():
+                win.iconbitmap(str(ICON_ICO))
+                if win is not self:
+                    # CTkToplevel через 200 мс ставить свою іконку — повертаємо нашу.
+                    win.after(250, lambda: win.iconbitmap(str(ICON_ICO)))
+            elif ICON_PNG.is_file():
+                if self._icon_photo is None:
+                    self._icon_photo = tkinter.PhotoImage(master=self, file=str(ICON_PNG))
+                win.iconphoto(False, self._icon_photo)
+        except tkinter.TclError:
+            pass  # без іконки програма все одно працює
+
     def _audio_mode(self) -> bool:
         return MEDIA_LABELS[self.media_var.get()] == "audio"
 
@@ -329,6 +366,7 @@ class App(ctk.CTk):
     def _show_message(self, title: str, text: str) -> None:
         win = ctk.CTkToplevel(self)
         win.title(title)
+        self._set_window_icon(win)
         win.resizable(False, False)
         win.transient(self)
         ctk.CTkLabel(win, text=text, justify="left", wraplength=460).pack(padx=20, pady=(20, 10))
@@ -515,6 +553,7 @@ class App(ctk.CTk):
             return
         win = ctk.CTkToplevel(self)
         win.title(f"Що нового у версії {self._release.version}")
+        self._set_window_icon(win)
         win.geometry("560x420")
         win.transient(self)
         box = ctk.CTkTextbox(win, wrap="word")
@@ -624,12 +663,13 @@ def self_test(report_path: str) -> int:
         report["yt_dlp"] = yt_dlp.version.__version__
         report["ejs_files"] = len(list(Path(yt_dlp_ejs.__file__).parent.rglob("*.js")))
         report["ffmpeg"] = dl.find_ffmpeg()
+        report["icon"] = ICON_ICO.is_file() and ICON_PNG.is_file()
         app = App()
         app.update()
         report["window"] = app.title()
         report["version"] = __version__
         app.destroy()
-        report["ok"] = report["ejs_files"] > 0
+        report["ok"] = report["ejs_files"] > 0 and report["icon"]
     except Exception:  # noqa: BLE001
         report["ok"] = False
         report["error"] = traceback.format_exc()

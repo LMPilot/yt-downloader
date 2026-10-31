@@ -46,18 +46,31 @@ def test_write_info_file_utf8(tmp_path):
 
 # ---------------------------------------------------------- folder names ---
 
-@pytest.mark.parametrize("char", list('<>:"/\\|?*'))
-def test_sanitize_replaces_forbidden_chars(char):
-    result = d.sanitize_folder_name(f"a{char}b")
-    assert result == "a_b"
+@pytest.mark.parametrize("char, lookalike", [
+    (":", "："), ("?", "？"), ("/", "⧸"), ("\\", "⧹"), ("*", "＊"),
+    ('"', "＂"), ("<", "＜"), (">", "＞"), ("|", "｜"),
+])
+def test_sanitize_replaces_forbidden_chars_with_lookalikes(char, lookalike):
+    assert d.sanitize_folder_name(f"a{char}b") == f"a{lookalike}b"
 
 
-def test_sanitize_control_chars():
-    assert d.sanitize_folder_name("a\x00b\x07c") == "a_b_c"
+def test_sanitize_matches_youtube_title():
+    assert d.sanitize_folder_name("Відео: огляд?") == "Відео： огляд？"
 
 
-def test_sanitize_collapses_whitespace():
-    assert d.sanitize_folder_name("  a \t\n  b  ") == "a b"
+@pytest.mark.parametrize("title", [
+    "Відео частина 1 🎬",
+    "Rock'n'roll #1 & co (live) [4K] — 100%",
+    "__init__ та -флаги ~ $HOME %(title)s",
+    "a  b",
+])
+def test_sanitize_keeps_other_chars(title):
+    assert d.sanitize_folder_name(title) == title
+
+
+def test_sanitize_control_chars_and_newlines():
+    assert d.sanitize_folder_name("a\x00b\x07c") == "a b c"
+    assert d.sanitize_folder_name("a\r\nb\tc") == "a b c"
 
 
 @pytest.mark.parametrize("name, expected", [
@@ -66,6 +79,7 @@ def test_sanitize_collapses_whitespace():
     ("Title . . ", "Title"),
     ("Title   ", "Title"),
     ("...Title", "Title"),
+    ("Що?.", "Що？"),
 ])
 def test_sanitize_strips_dots_and_spaces(name, expected):
     assert d.sanitize_folder_name(name) == expected
@@ -73,11 +87,11 @@ def test_sanitize_strips_dots_and_spaces(name, expected):
 
 def test_sanitize_length_limit():
     result = d.sanitize_folder_name("x" * 500)
-    assert len(result) == d.MAX_NAME_LENGTH
+    assert len(result) == d.MAX_NAME_LENGTH == 150
 
 
 def test_sanitize_length_limit_no_trailing_dot_after_cut():
-    name = "a" * 79 + ". tail"
+    name = "a" * 149 + ". tail"
     result = d.sanitize_folder_name(name)
     assert len(result) <= d.MAX_NAME_LENGTH
     assert not result.endswith((".", " "))
@@ -87,19 +101,50 @@ def test_sanitize_custom_length():
     assert d.sanitize_folder_name("abcdef", max_length=3) == "abc"
 
 
-@pytest.mark.parametrize("name", ["", None, "   ", "...", " . . "])
+@pytest.mark.parametrize("name", ["", None, "   ", "...", " . . ", "\n\t"])
 def test_sanitize_empty(name):
     assert d.sanitize_folder_name(name) == "video"
 
 
-@pytest.mark.parametrize("name", ["CON", "con", "NUL", "COM1", "LPT9", "aux.txt"])
+@pytest.mark.parametrize("name", ["CON", "con", "NUL", "COM1", "LPT9", "aux.txt", "PRN. "])
 def test_sanitize_reserved_names(name):
     result = d.sanitize_folder_name(name)
-    assert result.split(".")[0].upper() not in {"CON", "NUL", "COM1", "LPT9", "AUX"}
+    assert result.split(".")[0].upper() not in {"CON", "NUL", "COM1", "LPT9", "AUX", "PRN"}
 
 
-def test_sanitize_keeps_unicode():
-    assert d.sanitize_folder_name("Відео: частина 1 🎬") == "Відео_ частина 1 🎬"
+def test_sanitize_reserved_name_only_whole_stem():
+    assert d.sanitize_folder_name("Console: огляд") == "Console： огляд"
+
+
+def test_max_name_length_short_dir():
+    # Назва трапляється у шляху двічі (папка й файл), тож навіть для «C:\\YT»
+    # межа MAX_PATH менша за MAX_NAME_LENGTH.
+    limit = d.max_name_length("C:\\YT")
+    assert limit == (259 - 5 - 2 - 24) // 2 > 80
+
+
+def test_max_name_length_counts_utf16():
+    assert d.max_name_length("C:\\🎬🎬") == d.max_name_length("C:\\abcd")
+
+
+def test_max_name_length_fits_windows_path():
+    folder = "C:\\Users\\Користувач\\Downloads\\YT"
+    limit = d.max_name_length(folder)
+    assert d.MIN_NAME_LENGTH <= limit < d.MAX_NAME_LENGTH
+    name = "x" * limit
+    path = f"{folder}\\{name}\\{name}.f137.mp4.part"
+    assert len(path) < 260
+
+
+def test_max_name_length_very_long_dir():
+    assert d.max_name_length("C:\\" + "a" * 300) == d.MIN_NAME_LENGTH
+
+
+def test_folder_name_uses_output_dir_limit():
+    folder = "C:\\" + "d" * 150
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=folder))
+    name = dl.folder_name_for("я" * 300, "id1")
+    assert len(name) == d.max_name_length(os.path.abspath(folder))
 
 
 def test_unique_folder_names_for_duplicate_titles():
@@ -107,6 +152,17 @@ def test_unique_folder_names_for_duplicate_titles():
     assert dl.folder_name_for("Same", "id1") == "Same"
     assert dl.folder_name_for("Same", "id1") == "Same"
     assert dl.folder_name_for("Same", "id2") == "Same [id2]"
+
+
+def test_duplicate_long_title_keeps_id_within_limit(tmp_path):
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path)))
+    limit = d.max_name_length(str(tmp_path))
+    title = "Довга назва: " + "x" * 300
+    assert len(dl.folder_name_for(title, "aaaaaaaaaaa")) == limit
+    second = dl.folder_name_for(title, "bbbbbbbbbbb")
+    assert second.endswith(" [bbbbbbbbbbb]")
+    assert second.startswith("Довга назва： ")
+    assert len(second) <= limit
 
 
 # ---------------------------------------------------------------- URLs ---
@@ -268,6 +324,66 @@ def test_params_accepted_by_yt_dlp(tmp_path):
     with yt_dlp.YoutubeDL(dl.build_ydl_params()) as ydl:
         ydl.add_post_processor(d._FolderNamePP(dl), when="pre_process")
         ydl.add_post_processor(d._FinishPP(dl), when="after_move")
+
+
+@pytest.mark.parametrize("title", [
+    "Відео: огляд?", '__init__ — <b>|*/\\"', "-5% $HOME ~ #1 & 'ok' 🎬", "a\nb\x07", "12:30",
+])
+def test_yt_dlp_keeps_sanitized_name(title):
+    from yt_dlp.utils import sanitize_filename
+    name = d.sanitize_folder_name(title)
+    assert sanitize_filename(name) == name
+
+
+def _download_local(tmp_path, titles, save_thumbnail=False):
+    """Справжній прогін yt-dlp на локальному файлі замість YouTube."""
+    import yt_dlp
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"\0" * 1024)
+    out = tmp_path / "out"
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(out),
+                                        save_thumbnail=save_thumbnail))
+    params = dl.build_ydl_params()
+    params["enable_file_urls"] = True
+    with yt_dlp.YoutubeDL(params) as ydl:
+        ydl.add_post_processor(d._FolderNamePP(dl), when="pre_process")
+        ydl.add_post_processor(d._FinishPP(dl), when="after_move")
+        for i, title in enumerate(titles):
+            ydl.process_ie_result({
+                "id": f"vid{i}", "title": title, "description": "Опис",
+                "extractor": "test", "extractor_key": "Test", "webpage_url": "http://x",
+                "formats": [{"url": src.as_uri(), "ext": "mp4", "format_id": "18",
+                             "vcodec": "avc1", "acodec": "mp4a"}],
+            }, download=True)
+    return dl, out
+
+
+@pytest.mark.parametrize("title, name", [
+    ("Відео: огляд?", "Відео： огляд？"),
+    ('__init__ — <b>|*/\\"', "__init__ — ＜b＞｜＊⧸⧹＂"),
+    ("-5% знижка $HOME %(title)s ~ #1 & 'ok' 🎬", "-5% знижка $HOME %(title)s ~ #1 & 'ok' 🎬"),
+])
+def test_file_on_disk_named_like_title(tmp_path, title, name):
+    dl, out = _download_local(tmp_path, [title])
+    assert dl.result.downloaded == 1, dl.result.errors
+    assert (out / name / f"{name}.mp4").is_file()
+    assert (out / name / "info.txt").read_text(encoding="utf-8").startswith(title)
+
+
+def test_file_on_disk_duplicate_titles(tmp_path):
+    dl, out = _download_local(tmp_path, ["Те саме?", "Те саме?"])
+    assert dl.result.downloaded == 2, dl.result.errors
+    assert (out / "Те саме？" / "Те саме？.mp4").is_file()
+    assert (out / "Те саме？ [vid1]" / "Те саме？ [vid1].mp4").is_file()
+
+
+def test_thumbnail_path_uses_same_folder(tmp_path):
+    import yt_dlp
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path)))
+    with yt_dlp.YoutubeDL(dl.build_ydl_params()) as ydl:
+        info = {"id": "a", "title": "x", "ext": "webp", "yt_folder": "__Що？__"}
+        path = ydl.prepare_filename(info, "thumbnail")
+    assert path == os.path.join(str(tmp_path), "__Що？__", "preview.webp")
 
 
 # ------------------------------------------------------- папка завантаження ---
