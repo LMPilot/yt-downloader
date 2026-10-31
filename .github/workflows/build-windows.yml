@@ -70,6 +70,8 @@ jobs:
           if ($fileVersion -ne "${{ steps.version.outputs.version }}") {
             throw "exe file version is '$fileVersion', expected ${{ steps.version.outputs.version }}"
           }
+          python tools/check_exe_icon.py dist\yt-downloader.exe assets\icon.ico
+          if ($LASTEXITCODE -ne 0) { throw "exe icon does not match assets\icon.ico" }
           $expected = (Get-Content dist\yt-downloader.exe.sha256).Split()[0]
           $actual = (Get-FileHash dist\yt-downloader.exe -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $expected) { throw "sha256 file mismatch" }

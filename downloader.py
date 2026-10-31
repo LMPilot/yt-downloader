@@ -47,8 +47,13 @@ _AUDIO_SOURCE = {
 }
 
 # Максимальна довжина назви папки/файлу. Windows обмежує повний шлях
-# ~260 символами, а yt-dlp ще додає суфікси на кшталт ".f137.mp4.part".
-MAX_NAME_LENGTH = 80
+# 260 символами (MAX_PATH), тож для довгої папки завантаження межа менша —
+# див. ``max_name_length``.
+MAX_NAME_LENGTH = 150
+MIN_NAME_LENGTH = 40
+WINDOWS_MAX_PATH = 259  # 260 разом із завершальним нулем
+# Запас на суфікси yt-dlp / FFmpeg у назві файлу: ".f137.mp4.part", ".temp.mp4"…
+_SUFFIX_RESERVE = 24
 
 FFMPEG_INSTALL_HINT = (
     "FFmpeg не знайдено. Він потрібен, щоб зʼєднати відео й аудіо в MP4 "
@@ -65,7 +70,13 @@ JS_RUNTIME_HINT = (
     "Рекомендовано встановити: winget install DenoLand.Deno"
 )
 
-_FORBIDDEN_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+# Заборонені у Windows символи → їхні повноширинні двійники (так само робить
+# yt-dlp без ``windowsfilenames``), тож назва виглядає як на YouTube.
+_LOOKALIKES = str.maketrans({
+    ":": "\uff1a", "?": "\uff1f", "/": "\u29f8", "\\": "\u29f9", "*": "\uff0a",
+    '"': "\uff02", "<": "\uff1c", ">": "\uff1e", "|": "\uff5c",
+})
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 _WINDOWS_RESERVED = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -79,17 +90,21 @@ _CHANNEL_PATH = re.compile(r"^/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)(/[^/]*)
 # --------------------------------------------------------------------------- #
 
 def sanitize_folder_name(name: str | None, max_length: int = MAX_NAME_LENGTH) -> str:
-    """Перетворює назву відео на безпечну назву папки/файлу для Windows.
+    """Перетворює назву відео на назву папки/файлу для Windows, що виглядає
+    так само, як на YouTube.
 
-    - заборонені символи ``<>:"/\\|?*`` і керувальні символи → ``_``;
-    - кілька пробілів/переносів → один пробіл;
-    - без пробілів і крапок у кінці (Windows їх не допускає);
+    - заборонені символи ``<>:"/\\|?*`` → повноширинні двійники
+      (``：？⧸⧹＊＂＜＞｜``); решта (емодзі, кирилиця, ``'#&`` …) не змінюється;
+    - керувальні символи й переноси рядків → пробіл;
+    - без пробілів і крапок на початку й у кінці (Windows не допускає їх у кінці);
     - зарезервовані імена (CON, NUL, COM1, ...) отримують суфікс ``_``;
     - довжина не більша за ``max_length``;
     - порожній результат → ``video``.
+
+    Результат не містить символів, які yt-dlp змінює в полях шаблону
+    ``outtmpl``, тож ``%(yt_folder)s`` потрапляє в назву файлу без змін.
     """
-    text = " ".join((name or "").split())
-    text = _FORBIDDEN_CHARS.sub("_", text)
+    text = _CONTROL_CHARS.sub(" ", name or "").translate(_LOOKALIKES)
     text = text.strip(" .")
     if len(text) > max_length:
         text = text[:max_length].rstrip(" .")
@@ -99,6 +114,16 @@ def sanitize_folder_name(name: str | None, max_length: int = MAX_NAME_LENGTH) ->
     if stem.upper() in _WINDOWS_RESERVED:
         text = f"{stem}_{dot}{rest}"
     return text
+
+
+def max_name_length(output_dir: str | os.PathLike) -> int:
+    """Найбільша довжина назви, за якої повний шлях
+    ``<папка>\\<назва>\\<назва>.f137.mp4.part`` вкладається в 260 символів
+    Windows. Не більше ``MAX_NAME_LENGTH`` і не менше ``MIN_NAME_LENGTH``."""
+    # Windows рахує шлях у UTF-16: емодзі в назві папки займає 2 символи.
+    used = len(os.fspath(output_dir).encode("utf-16-le")) // 2
+    available = (WINDOWS_MAX_PATH - used - 2 - _SUFFIX_RESERVE) // 2
+    return max(MIN_NAME_LENGTH, min(MAX_NAME_LENGTH, available))
 
 
 def format_info_text(title: str | None, description: str | None) -> str:
@@ -355,11 +380,12 @@ class Downloader:
 
     def folder_name_for(self, title: str | None, video_id: str | None) -> str:
         """Унікальна в межах сесії назва папки (однакові назви → додається id)."""
-        name = sanitize_folder_name(title)
+        limit = max_name_length(os.path.abspath(os.path.expanduser(self.options.output_dir)))
+        name = sanitize_folder_name(title, limit)
         owner = self._used_names.get(name)
         if owner is not None and owner != video_id and video_id:
-            name = sanitize_folder_name(f"{name} [{video_id}]",
-                                        MAX_NAME_LENGTH + len(video_id) + 3)
+            suffix = f" [{video_id}]"
+            name = sanitize_folder_name(title, limit - len(suffix)) + suffix
         self._used_names.setdefault(name, video_id or "")
         return name
 
