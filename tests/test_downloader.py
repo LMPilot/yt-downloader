@@ -335,14 +335,15 @@ def test_yt_dlp_keeps_sanitized_name(title):
     assert sanitize_filename(name) == name
 
 
-def _download_local(tmp_path, titles, save_thumbnail=False):
+def _download_local(tmp_path, titles, save_thumbnail=False, strip_emoji=False):
     """Справжній прогін yt-dlp на локальному файлі замість YouTube."""
     import yt_dlp
     src = tmp_path / "src.mp4"
     src.write_bytes(b"\0" * 1024)
     out = tmp_path / "out"
     dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(out),
-                                        save_thumbnail=save_thumbnail))
+                                        save_thumbnail=save_thumbnail,
+                                        strip_emoji=strip_emoji))
     params = dl.build_ydl_params()
     params["enable_file_urls"] = True
     with yt_dlp.YoutubeDL(params) as ydl:
@@ -368,6 +369,109 @@ def test_file_on_disk_named_like_title(tmp_path, title, name):
     assert dl.result.downloaded == 1, dl.result.errors
     assert (out / name / f"{name}.mp4").is_file()
     assert (out / name / "info.txt").read_text(encoding="utf-8").startswith(title)
+
+
+def test_file_on_disk_without_emoji(tmp_path):
+    title = "Ліжко-айфон📱 ｜ Sleeping 😴 On A Giant iPhone"
+    dl, out = _download_local(tmp_path, [title], strip_emoji=True)
+    assert dl.result.downloaded == 1, dl.result.errors
+    name = "Ліжко-айфон ｜ Sleeping On A Giant iPhone"
+    assert (out / name / f"{name}.mp4").is_file()
+    # У info.txt назва лишається повною, з емодзі.
+    assert (out / name / "info.txt").read_text(encoding="utf-8").startswith(title)
+
+
+# ------------------------------------------------------------------ емодзі ---
+
+@pytest.mark.parametrize("title, expected", [
+    ("Seen📱 ｜ Giant iPhone ｜ 4K", "Seen ｜ Giant iPhone ｜ 4K"),
+    ("👨‍👩‍👧 Родина 🇺🇦 ❤️ ✅ ⭐ ⏰", "Родина"),
+    ("Без емодзі: #1 & 'ok'", "Без емодзі： #1 & 'ok'"),
+    ("🎬🎬🎬", "video"),
+])
+def test_sanitize_strips_emoji(title, expected):
+    assert d.sanitize_folder_name(title, remove_emoji=True) == expected
+
+
+def test_sanitize_keeps_emoji_by_default():
+    assert d.sanitize_folder_name("Seen📱") == "Seen📱"
+
+
+def test_strip_emoji_option_default_on(tmp_path):
+    assert d.DownloadOptions(url="x").strip_emoji is True
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path)))
+    assert dl.folder_name_for("A 📱 B", "id1") == "A B"
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path), strip_emoji=False))
+    assert dl.folder_name_for("A 📱 B", "id1") == "A 📱 B"
+
+
+# ------------------------------------------------------------------- H.264 ---
+
+def test_format_sort_prefers_h264():
+    assert d.build_format_options("1080", h264=True)["format_sort"] == [
+        "res:1080", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"]
+    assert d.build_format_options(d.QUALITY_BEST, h264=True)["format_sort"] == [
+        "res", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"]
+    assert d.build_format_options("1080")["format_sort"] == ["res:1080", "ext:mp4:m4a"]
+    assert "format_sort" not in d.build_format_options(d.QUALITY_AUDIO, h264=True)
+
+
+def test_h264_option_default_on_and_ignored_for_audio(tmp_path):
+    assert d.DownloadOptions(url="x").h264 is True
+    assert d.Downloader(d.DownloadOptions(url="x")).wants_h264()
+    assert not d.Downloader(d.DownloadOptions(url="x", h264=False)).wants_h264()
+    assert not d.Downloader(d.DownloadOptions(url="x", quality=d.QUALITY_AUDIO)).wants_h264()
+
+
+@pytest.mark.parametrize("codec, expected", [
+    ("avc1.640028", True), ("h264", True), ("av01.0.08M.08", False),
+    ("vp09.00.40.08", False), ("vp9", False), (None, False),
+])
+def test_is_h264(codec, expected):
+    assert d.is_h264(codec) is expected
+
+
+def test_h264_ffmpeg_args():
+    args = d.h264_ffmpeg_args("ffmpeg", "in.mp4", "out.mp4", copy_audio=True)
+    assert args[0] == "ffmpeg" and args[-1] == "out.mp4"
+    assert args[args.index("-c:v") + 1] == "libx264"
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p"
+    assert args[args.index("-c:a") + 1] == "copy"
+    args = d.h264_ffmpeg_args("ffmpeg", "in.mp4", "out.mp4", copy_audio=False)
+    assert args[args.index("-c:a") + 1] == "aac"
+
+
+def test_h264_pp_skips_h264_and_audio(tmp_path):
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path)))
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"data")
+    pp = d._H264PP(dl, "ffmpeg-that-does-not-exist")
+    for vcodec in ("avc1.640028", "none"):
+        _, info = pp.run({"filepath": str(f), "vcodec": vcodec})
+        assert info["vcodec"] == vcodec
+    assert f.read_bytes() == b"data"
+
+
+@pytest.mark.skipif(not d.find_ffmpeg(), reason="потрібен FFmpeg")
+def test_h264_pp_reencodes_vp9(tmp_path):
+    import subprocess
+    ffmpeg = d.find_ffmpeg()
+    src = tmp_path / "v.mp4"
+    subprocess.run([ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i",
+                    "testsrc=size=320x240:rate=10", "-f", "lavfi", "-i", "sine",
+                    "-t", "1", "-c:v", "libvpx-vp9", "-c:a", "libopus", str(src)], check=True)
+    events = []
+    dl = d.Downloader(d.DownloadOptions(url="x", output_dir=str(tmp_path)),
+                      on_event=lambda kind, data: events.append((kind, data)))
+    _, info = d._H264PP(dl, ffmpeg).run({"filepath": str(src), "vcodec": "vp09",
+                                         "acodec": "opus", "duration": 1, "title": "t"})
+    assert info["vcodec"] == "avc1" and info["acodec"] == "mp4a"
+    probe = subprocess.run([ffmpeg.replace("ffmpeg", "ffprobe"), "-v", "error",
+                            "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                            str(src)], capture_output=True, text=True).stdout.split()
+    assert probe == ["h264", "aac"]
+    assert not list(tmp_path.glob("*.h264.*"))  # тимчасовий файл прибрано
+    assert any(kind == "progress" for kind, _ in events)
 
 
 def test_file_on_disk_duplicate_titles(tmp_path):
