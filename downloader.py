@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -77,6 +78,21 @@ _LOOKALIKES = str.maketrans({
     '"': "\uff02", "<": "\uff1c", ">": "\uff1e", "|": "\uff5c",
 })
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+# Емодзі й супутні символи (модифікатори шкіри, ZWJ, варіантні селектори,
+# прапори, keycap). Premiere Pro та інші редактори часто не відкривають
+# файли, у шляху яких є емодзі.
+_EMOJI = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"  # емодзі, піктограми, прапори, модифікатори шкіри
+    "\U0001FC00-\U0001FFFF"
+    "\U000E0020-\U000E007F"  # теги (прапори регіонів)
+    "☀-➿"          # різні символи та dingbats: ☀ ✅ ❤ ✨
+    "⬀-⯿"          # ⭐ ⬆ ⬛
+    "⌀-⏿"          # ⌚ ⏰ ⏩
+    "‍⃣︎️"
+    "]+"
+)
+_SPACES = re.compile(r"\s{2,}")
 _WINDOWS_RESERVED = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -89,12 +105,19 @@ _CHANNEL_PATH = re.compile(r"^/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)(/[^/]*)
 # Чисті функції (покриті тестами)
 # --------------------------------------------------------------------------- #
 
-def sanitize_folder_name(name: str | None, max_length: int = MAX_NAME_LENGTH) -> str:
+def strip_emoji(text: str) -> str:
+    """Прибирає емодзі; подвійні пробіли, що лишилися на їхньому місці, → один."""
+    return _SPACES.sub(" ", _EMOJI.sub(" ", text)).strip()
+
+
+def sanitize_folder_name(name: str | None, max_length: int = MAX_NAME_LENGTH,
+                         remove_emoji: bool = False) -> str:
     """Перетворює назву відео на назву папки/файлу для Windows, що виглядає
     так само, як на YouTube.
 
     - заборонені символи ``<>:"/\\|?*`` → повноширинні двійники
-      (``：？⧸⧹＊＂＜＞｜``); решта (емодзі, кирилиця, ``'#&`` …) не змінюється;
+      (``：？⧸⧹＊＂＜＞｜``); решта (кирилиця, ``'#&`` …) не змінюється;
+    - емодзі прибираються, якщо ``remove_emoji`` (інакше лишаються);
     - керувальні символи й переноси рядків → пробіл;
     - без пробілів і крапок на початку й у кінці (Windows не допускає їх у кінці);
     - зарезервовані імена (CON, NUL, COM1, ...) отримують суфікс ``_``;
@@ -105,6 +128,8 @@ def sanitize_folder_name(name: str | None, max_length: int = MAX_NAME_LENGTH) ->
     ``outtmpl``, тож ``%(yt_folder)s`` потрапляє в назву файлу без змін.
     """
     text = _CONTROL_CHARS.sub(" ", name or "").translate(_LOOKALIKES)
+    if remove_emoji:
+        text = strip_emoji(text)
     text = text.strip(" .")
     if len(text) > max_length:
         text = text[:max_length].rstrip(" .")
@@ -191,11 +216,16 @@ def normalize_url(url: str) -> str:
 
 
 def build_format_options(quality: str, audio_bitrate: str = "192",
-                         audio_format: str = DEFAULT_AUDIO_FORMAT) -> dict:
+                         audio_format: str = DEFAULT_AUDIO_FORMAT,
+                         h264: bool = False) -> dict:
     """Параметри yt-dlp для вибраної якості.
 
     ``quality == QUALITY_AUDIO`` — лише аудіо у форматі ``audio_format``
     (MP3, M4A або OPUS); ``audio_bitrate`` застосовується лише до MP3.
+
+    ``h264`` — серед форматів однакової роздільності брати H.264 + AAC.
+    YouTube віддає H.264 лише до 1080p; вищу роздільність (AV1/VP9) потім
+    перекодовує ``_H264PP``.
     """
     if quality == QUALITY_AUDIO:
         if audio_format not in AUDIO_FORMATS:
@@ -216,6 +246,8 @@ def build_format_options(quality: str, audio_bitrate: str = "192",
         sort = [f"res:{quality}", "ext:mp4:m4a"]
     else:
         raise ValueError(f"Невідома якість: {quality}")
+    if h264:
+        sort[1:1] = ["vcodec:h264", "acodec:aac"]
     return {
         "format": "bv*+ba/b",
         "format_sort": sort,
@@ -237,6 +269,28 @@ def has_js_runtime() -> bool:
     return any(shutil.which(name) for name in ("deno", "node"))
 
 
+def is_h264(vcodec: str | None) -> bool:
+    """Чи кодек відео — H.264 (``avc1.640028``, ``h264`` …)."""
+    codec = (vcodec or "").lower()
+    return codec.startswith(("avc", "h264"))
+
+
+def h264_ffmpeg_args(ffmpeg: str, src: str, dst: str, copy_audio: bool) -> list[str]:
+    """Команда FFmpeg: перекодувати відео в H.264 (8 біт, yuv420p — це
+    відкриває Premiere Pro 2023 і старіші редактори). Аудіо копіюється, якщо
+    воно вже AAC, інакше перекодовується в AAC 192 кбіт/с."""
+    audio = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", "192k"]
+    return [
+        ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", src,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-profile:v", "high",
+        *audio, "-movflags", "+faststart",
+        "-progress", "pipe:1", "-nostats", "-loglevel", "error",
+        dst,
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Завантаження
 # --------------------------------------------------------------------------- #
@@ -251,6 +305,8 @@ class DownloadOptions:
     audio_format: str = DEFAULT_AUDIO_FORMAT
     save_info: bool = True
     save_thumbnail: bool = True
+    h264: bool = True
+    strip_emoji: bool = True
     output_dir: str = DEFAULT_OUTPUT_DIR
 
 
@@ -321,7 +377,8 @@ class Downloader:
             "progress_hooks": [self._progress_hook],
             "postprocessor_hooks": [self._postprocessor_hook],
         }
-        params.update(build_format_options(opts.quality, opts.audio_bitrate, opts.audio_format))
+        params.update(build_format_options(opts.quality, opts.audio_bitrate,
+                                           opts.audio_format, opts.h264))
         if opts.save_thumbnail:
             # Найкраще прев'ю відео → preview.jpg у папці відео (WebP від
             # YouTube конвертується в JPG, щоб відкривався будь-де).
@@ -366,6 +423,8 @@ class Downloader:
         try:
             with yt_dlp.YoutubeDL(params) as ydl:
                 ydl.add_post_processor(_FolderNamePP(self), when="pre_process")
+                if self.wants_h264():
+                    ydl.add_post_processor(_H264PP(self, ffmpeg), when="post_process")
                 ydl.add_post_processor(_FinishPP(self), when="after_move")
                 ydl.download([url])
         except yt_dlp.utils.DownloadCancelled:
@@ -378,14 +437,18 @@ class Downloader:
         if self._cancel.is_set():
             raise yt_dlp.utils.DownloadCancelled("Скасовано користувачем")
 
+    def wants_h264(self) -> bool:
+        return self.options.h264 and self.options.quality != QUALITY_AUDIO
+
     def folder_name_for(self, title: str | None, video_id: str | None) -> str:
         """Унікальна в межах сесії назва папки (однакові назви → додається id)."""
         limit = max_name_length(os.path.abspath(os.path.expanduser(self.options.output_dir)))
-        name = sanitize_folder_name(title, limit)
+        no_emoji = self.options.strip_emoji
+        name = sanitize_folder_name(title, limit, no_emoji)
         owner = self._used_names.get(name)
         if owner is not None and owner != video_id and video_id:
             suffix = f" [{video_id}]"
-            name = sanitize_folder_name(title, limit - len(suffix)) + suffix
+            name = sanitize_folder_name(title, limit - len(suffix), no_emoji) + suffix
         self._used_names.setdefault(name, video_id or "")
         return name
 
@@ -434,6 +497,70 @@ class _FolderNamePP(PostProcessor):
         self.dl._emit("log", {"message": f"▶ [{pos}] {info.get('title', '')}",
                               "level": "info"})
         return [], info
+
+
+class _H264PP(PostProcessor):
+    """Якщо готове відео не в H.264 (YouTube дає H.264 лише до 1080p),
+    перекодовує його через FFmpeg, показуючи прогрес і реагуючи на «Скасувати»."""
+
+    def __init__(self, downloader: Downloader, ffmpeg: str):
+        super().__init__()
+        self.dl = downloader
+        self.ffmpeg = ffmpeg
+
+    def run(self, info):
+        src = info.get("filepath") or ""
+        if not src or not os.path.isfile(src) or is_h264(info.get("vcodec")):
+            return [], info
+        if (info.get("vcodec") or "none") == "none":  # лише аудіо
+            return [], info
+        title = info.get("title") or ""
+        self.dl._emit("log", {"message": f"Перекодування в H.264 ({info.get('vcodec')} → "
+                                         "H.264), це може зайняти кілька хвилин…",
+                              "level": "info"})
+        root, ext = os.path.splitext(src)
+        tmp = f"{root}.h264{ext}"
+        copy_audio = (info.get("acodec") or "").lower().startswith("mp4a")
+        cmd = h264_ffmpeg_args(self.ffmpeg, src, tmp, copy_audio)
+        duration = float(info.get("duration") or 0)
+        index, total = self.dl._position(info)
+        try:
+            self._encode(cmd, duration, index, total, title)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+        os.replace(tmp, src)
+        info["vcodec"] = "avc1"
+        if not copy_audio:
+            info["acodec"] = "mp4a"
+        return [], info
+
+    def _encode(self, cmd, duration, index, total, title) -> None:
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=flags)
+        try:
+            for line in proc.stdout:
+                if self.dl._cancel.is_set():
+                    proc.kill()
+                    break
+                key, _, value = line.strip().partition("=")
+                if key == "out_time_us" and duration and value.isdigit():
+                    percent = min(100.0, int(value) / 1e6 * 100.0 / duration)
+                    self.dl._emit("progress", {"index": index, "total": total,
+                                               "percent": percent, "speed": None,
+                                               "title": f"H.264: {title}"})
+            proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.dl._check_cancel()
+        if proc.returncode != 0:
+            error = (proc.stderr.read() or "").strip().splitlines()[-1:] or ["?"]
+            raise yt_dlp.utils.PostProcessingError(f"FFmpeg (H.264): {error[0]}")
 
 
 class _FinishPP(PostProcessor):

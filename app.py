@@ -185,6 +185,10 @@ class App(ctk.CTk):
         self.quality_menu = ctk.CTkOptionMenu(self.video_options, values=list(QUALITY_LABELS),
                                               variable=self.quality_var)
         self.quality_menu.grid(row=0, column=1)
+        # H.264 відкривається в Premiere Pro та будь-якому редакторі; AV1/VP9 — ні.
+        self.h264_var = ctk.BooleanVar(value=saved.get("h264", True) is not False)
+        ctk.CTkCheckBox(self.video_options, text="H.264",
+                        variable=self.h264_var).grid(row=0, column=2, padx=(16, 0))
 
         # Налаштування аудіо: формат і бітрейт MP3.
         self.audio_options = ctk.CTkFrame(quality_frame, fg_color="transparent")
@@ -215,7 +219,11 @@ class App(ctk.CTk):
             value=saved.get("save_thumbnail", True) is not False)
         ctk.CTkCheckBox(quality_frame, text="Зберігати прев'ю (preview.jpg)",
                         variable=self.save_thumbnail_var).grid(row=3, column=0,
-                                                               sticky="w", padx=12, pady=(0, 10))
+                                                               sticky="w", padx=12, pady=(0, 6))
+        self.strip_emoji_var = ctk.BooleanVar(value=saved.get("strip_emoji", True) is not False)
+        ctk.CTkCheckBox(quality_frame, text="Прибирати емодзі з назв файлів і папок",
+                        variable=self.strip_emoji_var).grid(row=4, column=0,
+                                                            sticky="w", padx=12, pady=(0, 10))
 
         # --- прогрес ---------------------------------------------------------
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -408,6 +416,8 @@ class App(ctk.CTk):
             audio_format=AUDIO_FORMAT_LABELS[self.audio_format_var.get()],
             save_info=self.save_info_var.get(),
             save_thumbnail=self.save_thumbnail_var.get(),
+            h264=self.h264_var.get(),
+            strip_emoji=self.strip_emoji_var.get(),
             output_dir=folder,
         )
 
@@ -635,6 +645,8 @@ class App(ctk.CTk):
             "theme": THEME_LABELS[self.theme_var.get()],
             "save_info": bool(self.save_info_var.get()),
             "save_thumbnail": bool(self.save_thumbnail_var.get()),
+            "h264": bool(self.h264_var.get()),
+            "strip_emoji": bool(self.strip_emoji_var.get()),
         }
         count = self.count_entry.get().strip()
         if count.isdigit() and int(count) > 0:
